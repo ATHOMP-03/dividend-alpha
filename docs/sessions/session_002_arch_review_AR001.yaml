@@ -1,0 +1,482 @@
+# Architecture Agent Review — Variable Set AR-001
+# Session: 002
+# Date: 2026-03-28
+# Input: session_002_research_variables.yaml (45 variables, V-001 to V-045)
+# Cross-reference: TB-001 (Chronos-2), TB-004 (NeuralForecast)
+# Type: feature_review (batch — pre-Bloomberg pull)
+
+arch_review_id: AR-001
+type: feature_review_batch
+target_feature_set: "V-001 through V-045"
+verdict: approved_with_notes
+
+checks_completed:
+  leakage_audit: "complete"
+  bloomberg_consistency: "complete"
+  schema_conventions: "complete"
+  redundancy_check: "complete"
+  outlier_missing_strategy: "complete — notes below"
+  unit_test_coverage: "incomplete — no code exists yet. Required before FE begins."
+  traceability: "complete"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANDATORY CHECK 1 — DATA LEAKAGE AUDIT
+# ─────────────────────────────────────────────────────────────────────────────
+
+leakage_assessment: suspect
+
+leakage_findings:
+
+  - variable: V-032 (total_return_index)
+    severity: error
+    assessment: confirmed_risk_not_leak
+    description: >
+      Total return index is the TARGET VARIABLE. It is correctly flagged in
+      the research brief as never-use-as-feature. However, no architecture
+      enforcement exists yet. Must be enforced in code with an explicit
+      column exclusion guard before any model training call.
+    required_action: >
+      Coding agent must implement a TARGET_COLS exclusion list in
+      src/features/panel_builder.py. Architecture agent will block milestone
+      AR-M01 if this guard is absent from unit tests.
+
+  - variable: V-011 (G_NOA — net operating asset growth)
+    severity: error
+    assessment: suspect
+    description: >
+      G_NOA is the strongest predictor in RB-002 (RVI=100) and also the
+      highest leakage risk. The derivation requires balance sheet values from
+      two adjacent periods. If the denominator (NOA_t-1) is not correctly
+      lagged to the filing date (not the quarter-end date), look-ahead bias
+      is introduced. Bloomberg BS fields are reported as of filing date, not
+      always as of period-end. Quarterly filing lag is typically 40-45 days
+      for US large-caps (10-Q deadline) but up to 90 days for foreign filers.
+    required_action: >
+      Coding agent must document the exact construction window. Suggested
+      safe approach: use NOA values from the Bloomberg filing date field
+      (FILING_STATUS or EQY_FILING_DATE) rather than quarter-end.
+      Flag: LEAKAGE CHECK comment on every line touching NOA_t-1.
+
+  - variable: V-014 (operating_accruals)
+    severity: warning
+    assessment: suspect
+    description: >
+      Accruals = (NI - OCF) / NOA_t-1. Both NI and OCF are income statement
+      / cash flow statement items from the SAME period as the denominator
+      NOA_t-1. The filing lag issue from V-011 propagates here.
+      Additionally, if NOA_t-1 is derived from period t-1 but NI and OCF
+      are from period t, the construction window spans two filing dates —
+      confirm both are available at time t before use.
+    required_action: >
+      Document filing date alignment explicitly. Add leakage_notes field
+      to FE-XXX spec when coding agent implements this variable.
+
+  - variable: V-013 (asset_turnover)
+    severity: warning
+    assessment: suspect
+    description: >
+      ATO = Revenue_t / NOA_t-1. Revenue from current quarter income
+      statement, NOA from prior filing. If Revenue is not yet filed at time
+      t (income statements released ~40 days after quarter-end), this ratio
+      cannot be computed at true time t. Requires coding agent to confirm
+      Bloomberg income statement availability dates.
+    required_action: >
+      Use Bloomberg field ANNOUNCEMENT_DT or EARN_ANN_DT to confirm
+      that quarterly income statement was released before feature date.
+
+  - variable: V-035 (analyst_eps_consensus) and V-036 (analyst_ltg_estimate)
+    severity: warning
+    assessment: suspect
+    description: >
+      Bloomberg BEST_EPS stores the CURRENT consensus estimate, not the
+      historical vintage. To pull the estimate that was available at time t
+      (not today's revised estimate), the coding agent must use Bloomberg's
+      BDH with the BEST_EPS field AND specify the correct override:
+      BEST_FPERIOD_OVERRIDE. Without this, the pull will return
+      forward-revised estimates that contain look-ahead bias.
+    required_action: >
+      Coding agent must use Bloomberg BDH with override:
+        BDH(ticker, "BEST_EPS", start_date, end_date,
+            "BEST_FPERIOD_OVERRIDE", "1BF",
+            "BEST_CONSENSUS_OVERRIDE", "BEst")
+      Verify with test pull on 1 ticker before full universe pull.
+      Flag as LEAKAGE CHECK in src/bloomberg/pull.py.
+
+  - variable: V-023 (free_cash_flow) and V-024 (operating_cash_flow)
+    severity: warning
+    assessment: suspect
+    description: >
+      Cash flow statements have the longest filing lags — 10-Q deadline is
+      45 days after quarter-end for US filers. For non-US filers in the
+      universe (TSM, AZN, etc.), the lag can be 60-90 days. Using
+      quarter-end date as the feature construction date without accounting
+      for this lag introduces look-ahead for roughly 6-8 weeks.
+    required_action: >
+      Define feature construction date as 60 days after quarter-end
+      (conservative) OR pull Bloomberg filing date per ticker and use
+      that as the safe construction window. Document in bloomberg_pull_spec.yaml.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANDATORY CHECK 2 — BLOOMBERG FIELD CONSISTENCY
+# ─────────────────────────────────────────────────────────────────────────────
+
+bloomberg_consistency_findings:
+
+  - issue: V-030 duplicates V-015
+    severity: warning
+    description: >
+      V-015 (ln_total_assets) and V-030 (total_assets) both reference
+      BS_TOT_ASSET. Research agent noted this: pull once, derive both.
+      Ensure the Bloomberg pull script pulls this field only once and
+      feature engineering derives ln_total_assets as a transformation.
+    suggested_fix: Merge V-015 and V-030 into a single Bloomberg pull.
+                   Derive ln_total_assets in feature engineering.
+
+  - issue: V-039 and V-040 use Index tickers not equity tickers
+    severity: warning
+    description: >
+      Macro fields (USGG10YR Index, FDTR Index, VIX Index) require a
+      separate Bloomberg pull using Index tickers, not equity tickers.
+      The Bloomberg pull script must handle two ticker universes: equity
+      (101 tickers) and index (4 macro tickers). Do not mix in same request.
+    suggested_fix: >
+      Create separate macro pull function in src/bloomberg/pull.py.
+      Merge to panel on date after pull.
+
+  - issue: V-037 (INST_HOLDINGS_PCT) field name
+    severity: warning
+    description: >
+      Bloomberg field for institutional ownership percentage varies by
+      terminal version. Verify: EQY_INST_HOLDINGS_PCT vs INST_HOLDINGS_PCT.
+      Cross-check at terminal before committing to pull script.
+    suggested_fix: Confirm field mnemonic at terminal on first ticker before
+                   running full universe.
+
+  - issue: Non-US filers — historical field coverage before 2010
+    severity: warning
+    description: >
+      Bloomberg coverage for non-US tickers (MUFG, HDB, TV, FMX, CX, PBR)
+      is often spotty before 2010-2012 for quarterly fundamentals. The
+      history_start of 2008-01-01 may return sparse or missing data for
+      these tickers. This will affect panel balance.
+    suggested_fix: >
+      Run a coverage check (BDH with IGNORE_SECURITY_ERROR=TRUE) on
+      non-US tickers first. Document missingness pattern. Consider
+      2012-01-01 as safe effective start for non-US fundamentals.
+
+  - issue: V-008 (indicated_annual_dividend) marked as snapshot only
+    severity: info
+    description: >
+      Correctly flagged as snapshot only — not for panel. Confirm this
+      field is excluded from the BDH time-series pull and used only
+      for the current-state reference sheet.
+    suggested_fix: None — correctly scoped.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANDATORY CHECK 3 — SCHEMA AND NAMING CONVENTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_findings:
+
+  - issue: Derived variables (V-011, V-013, V-014) need explicit FE-XXX specs
+    severity: warning
+    description: >
+      The four derived variables (G_NOA, asset_turnover, accruals, special
+      dividend flag) are defined at Bloomberg field level but do not yet
+      have feature_spec.yaml entries (FE-XXX). These must be created by
+      the coding agent before architecture review can fully validate them.
+    suggested_fix: >
+      Coding agent: create FE-001 (fcf_payout_ratio), FE-002 (g_noa),
+      FE-003 (accruals), FE-004 (asset_turnover) as first four feature
+      specs. Submit each to architecture agent for Check 1 before
+      implementing notebook cells.
+
+  - issue: Missing _missing flag specification for all derived variables
+    severity: warning
+    description: >
+      Schema convention requires a {feature_name}_missing binary flag
+      column for every derived variable. This is not yet specified for
+      V-011, V-013, V-014. Must be included in FE-XXX specs.
+    suggested_fix: Add missing_strategy field to all FE-XXX specs:
+                   "Flag with {name}_missing = 1; do not impute."
+
+  - issue: Non-US tickers require is_adr and is_reit flags
+    severity: warning
+    description: >
+      Universe includes 24 non-US tickers and 2 REIT/utility tickers.
+      These require binary flag columns: is_adr, is_reit, is_utility.
+      Per RB-003, REIT dividends behave differently under tax law.
+      Per RB-005, sector membership is a critical confounder.
+    suggested_fix: Add to universe metadata file in data/universe/.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANDATORY CHECK 4 — REDUNDANCY AND MULTICOLLINEARITY
+# ─────────────────────────────────────────────────────────────────────────────
+
+redundancy_findings:
+
+  - pair: V-015 (ln_total_assets) / V-016 (market_cap)
+    expected_correlation: high (0.75-0.85)
+    assessment: acceptable — different information
+    note: >
+      Book-based size vs market-based size. Their divergence (market/book
+      spread) is itself a signal (V-019 P/B captures this). Keep both
+      but document correlation in feature registry.
+
+  - pair: V-017 (beta_1y) / V-018 (beta_5y)
+    expected_correlation: high (0.80+)
+    assessment: borderline — consider keeping only one for initial model
+    note: >
+      1Y and 5Y betas are highly correlated. Divergence (beta_5y -
+      beta_1y) may be more informative than either raw value.
+      Coding agent: derive beta_divergence as a feature and test.
+      Drop V-018 raw if correlation exceeds 0.85 in sample.
+
+  - pair: V-021 (D/E ratio) / V-022 (interest_coverage)
+    expected_correlation: moderate-high (0.65-0.75 inverse)
+    assessment: acceptable — mechanically related but distinct signals
+    note: D/E captures stock of debt; interest coverage captures flow.
+          Both are relevant for cut-risk model. Keep both.
+
+  - pair: V-026 (revenue) / V-030 (total_assets)
+    expected_correlation: high across universe
+    assessment: not an issue — used for derivations, not as raw features
+    note: These are inputs to derived features. They should NOT appear
+          as raw columns in the modeling panel — only derived features
+          (asset_turnover, G_NOA) should be in the feature matrix.
+
+  - pair: V-001 (DVD_SH_12M) / V-002 (DVD_YLD)
+    expected_correlation: high (yield = DPS / price)
+    assessment: acceptable — different use cases
+    note: V-001 used for Chronos-2 time series input.
+          V-002 used as confounder control (per RB-005 warning — do
+          not use as primary predictor). Keep both, different roles.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANDATORY CHECK 5 — OUTLIER AND MISSING DATA STRATEGY
+# ─────────────────────────────────────────────────────────────────────────────
+
+missing_data_strategy:
+  global_policy: >
+    Never silently drop rows. All missing values must be flagged with
+    {feature_name}_missing = 1 before any imputation or exclusion.
+    Missingness pattern must be characterized (MCAR/MAR/MNAR) before
+    the milestone review AR-M01.
+
+  specific_concerns:
+
+    - variable: Non-US fundamental fields pre-2012
+      strategy: >
+        Flag as missing. Do not impute. Document coverage start date
+        per ticker in data/universe/ metadata.
+
+    - variable: V-035 / V-036 (analyst estimates)
+      strategy: >
+        Coverage starts ~2002 for 56% of universe (per RB-004).
+        Flag missing as analyst_eps_missing = 1. Do not impute.
+        Assess whether missingness is MCAR (coverage limitation)
+        or MAR (correlated with firm size/coverage).
+
+    - variable: V-038 (special_dividend_flag)
+      strategy: >
+        Missing means no dividend event that quarter — code as 0,
+        not missing. Binary event flag: 0 = no special, 1 = special paid.
+
+    - variable: Derived variables (G_NOA, accruals, ATO)
+      strategy: >
+        If any input field is missing, the derived variable is missing.
+        Flag with {name}_missing = 1. Consider sector-quarter median
+        imputation only after missingness pattern is characterized —
+        and only if MCAR.
+
+  outlier_treatment:
+    global_policy: >
+      Winsorize all ratio-based features at 1st/99th percentile
+      WITHIN sector-quarter, not across full panel. This prevents
+      utility/REIT outliers from distorting non-regulated sectors.
+    specific:
+      - V-011 (G_NOA): cap at [-1.0, 3.0] — consistent with RB-002 sample
+      - V-014 (accruals): cap at [-0.4, 0.4] — per RB-002 sample range
+      - V-021 (D/E): cap at [0, 10] — extreme leverage flagged separately
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANDATORY CHECK 6 — UNIT TEST COVERAGE
+# ─────────────────────────────────────────────────────────────────────────────
+
+unit_test_coverage:
+  status: incomplete
+  reason: >
+    No feature engineering code exists yet — this is a pre-pull variable
+    specification review. Unit test requirement is deferred to FE-XXX
+    individual reviews. Each FE-XXX spec submitted to architecture agent
+    must include a corresponding test specification before approval.
+  required_tests_when_code_exists:
+    - "Test target variable (V-032) is excluded from feature matrix"
+    - "Test G_NOA (V-011) construction uses t-1 NOA not t"
+    - "Test accruals (V-014) denominator is NOA_t-1 not NOA_t"
+    - "Test analyst estimate (V-035) pulls vintage not current consensus"
+    - "Test special dividend flag (V-038) codes 0 for no-event quarters"
+    - "Test non-US tickers have is_adr=1 flag"
+    - "Test REIT/utility tickers have is_reit/is_utility=1 flag"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANDATORY CHECK 7 — TRACEABILITY
+# ─────────────────────────────────────────────────────────────────────────────
+
+traceability:
+  research_brief_linkage: complete
+  source_documents:
+    - "RB-001: V-015, V-017, V-019, V-020, V-021, V-002, V-007"
+    - "RB-002: V-009, V-010, V-011, V-012, V-013, V-014, V-023, V-024, V-026, V-027"
+    - "RB-003: V-037, V-038, V-045"
+    - "RB-004: V-035, V-036"
+    - "RB-005: V-002 (cautionary — do not use as primary predictor)"
+    - "No brief: V-022, V-025, V-028, V-033, V-034, V-039-V-044 (engineering judgment)"
+  unattributed_variables_assessment: >
+    13 variables lack a specific research brief citation. These are
+    mechanically required inputs (revenue, total assets for derivations)
+    or standard macro/identity fields. They are justifiable without a
+    specific paper citation. Mark source_research_brief as null with
+    justification in FE-XXX specs.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OSS AGENT CROSS-REFERENCE (TB-001 Chronos-2, TB-004 NeuralForecast)
+# ─────────────────────────────────────────────────────────────────────────────
+
+oss_cross_reference:
+
+  chronos2_compatibility:
+    verdict: compatible
+    dual_pipeline_decision: approved
+    notes:
+      - "Chronos-2 accepts (id, timestamp, target) + covariate columns"
+      - "Quarterly frequency (QE) is supported natively"
+      - "V-039 (10Y rate), V-040 (fed funds), V-041 (VIX) map directly to known_covariates"
+      - "V-009 (RNOA), V-015 (ln_assets) map to past/static covariates"
+    pipeline_1:
+      target: "V-001 — dividend_per_share_ttm (DVD_SH_12M)"
+      covariates_known: [V-039, V-040, V-041, V-042]
+      covariates_past: [V-009, V-010, V-011, V-014, V-015, V-017, V-023]
+      rationale: >
+        Dividend series is more stationary and aligns with Chronos-2
+        pretraining distribution. Fundamental covariates capture payout
+        capacity. Macro covariates passed as known-future inputs.
+        Output: forecasted DPS trajectory → used to construct expected
+        forward yield and dividend growth rate for scoring.
+      notebook: notebooks/03a_model_chronos_dividend_series.ipynb
+
+    pipeline_2:
+      target: "V-032 — total_return_index (TOT_RETURN_INDEX_GROSS_DVDS)"
+      covariates_known: [V-039, V-040, V-041, V-042]
+      covariates_past: [V-009, V-010, V-011, V-014, V-015, V-017, V-023]
+      rationale: >
+        Direct total return forecast. More volatile series — may require
+        fine-tuning on Bloomberg panel to outperform zero-shot baseline.
+        Compared against pipeline 1 composite to validate which is a
+        better predictor of realized returns.
+      notebook: notebooks/03b_model_chronos_total_return.ipynb
+
+    comparison_design: >
+      Both pipelines run in parallel on the same walk-forward splits.
+      Evaluation metric: out-of-sample CRPS and WQL on held-out quarters.
+      Pipeline 1 output (forecasted DPS) is converted to an implied total
+      return estimate using current price and historical yield-price relationship.
+      The two implied return estimates are then compared against realized
+      total return (V-032 lagged +4Q) to determine which pipeline produces
+      more accurate forward return predictions. The better-performing pipeline
+      feeds the composite scoring model.
+
+  neuralforecast_compatibility:
+    verdict: compatible
+    notes:
+      - "NeuralForecast TFT supports static covariates: GICS sector (V-043),
+         foreign_incorporated flag (V-045), is_reit, is_utility, market_cap_class"
+      - "NeuralForecast TFT supports time-varying known: macro variables V-039-V-042"
+      - "NeuralForecast TFT supports time-varying unknown: all fundamental features"
+      - "Panel structure (unique_id=ticker, ds=quarter_end, y=target) is correct"
+      - "Universe: 76 US tickers × 72 quarters (2008-2026) = 5,472 obs.
+         72 quarters per ticker is borderline for TFT — empirical validation required.
+         Cross-sectional pooling across 76 tickers is the primary mitigation."
+    flag: >
+      SHORT SERIES RISK: 72 quarters per ticker is at the lower bound for
+      NeuralForecast TFT. Mitigations: (1) Train jointly across all 76 tickers
+      (cross-sectional pooling). (2) Use simpler NF models (NHITS, NBEATS)
+      as fallback if TFT underperforms. Assess empirically.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BLOCKING ISSUES
+# ─────────────────────────────────────────────────────────────────────────────
+
+blocking_issues:
+  - "V-032 target variable exclusion guard must be implemented before any model call"
+  - "V-035/V-036 analyst estimate vintage pull methodology must be confirmed at terminal"
+
+warnings:
+  - "V-011 G_NOA: highest leakage risk in variable set — mandatory Check 1 on FE-002"
+  - "REIT/utility tickers (WELL, NEE): sector normalization critical before composite scoring"
+  - "Five foreign-incorporated US-listed tickers (UL, SCCO, CB, ETN, LIN): flag for sensitivity"
+  - "NeuralForecast short series risk: 72Q per ticker is borderline for TFT"
+  - "Unit tests not yet written — required before milestone AR-M01"
+
+approved_to_proceed: true
+approval_note: >
+  Variable set is approved for Bloomberg pull with notes. The two blocking
+  issues must be resolved in the Bloomberg pull script and feature engineering
+  code before model training begins. All suspects are documented and will be
+  re-reviewed when FE-XXX specs are submitted individually.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TECHNICAL DEBT LOG
+# ─────────────────────────────────────────────────────────────────────────────
+
+technical_debt_log:
+
+  - id: TD-001
+    description: >
+      Analyst estimate vintage pull (V-035, V-036) requires Bloomberg BDH
+      override parameters. Not yet implemented. If pulled without override,
+      all analyst estimate features will contain look-ahead bias.
+    introduced_at: "session_002 — pre-pull variable spec"
+    priority: high
+    resolution_plan: >
+      Coding agent implements BDH override in src/bloomberg/pull.py before
+      analyst estimate fields are pulled. Architecture agent validates
+      with test pull on 1 ticker (JPM) comparing override vs non-override
+      to confirm vintage behavior.
+
+  - id: TD-002
+    description: >
+      Non-US ticker filing lag variability not yet characterized per ticker.
+      Using a uniform 60-day lag is conservative but may drop valid data
+      for faster-filing US companies.
+    introduced_at: "session_002 — pre-pull variable spec"
+    priority: medium
+    resolution_plan: >
+      After Bloomberg pull, compare FILING_STATUS or EQY_FILING_DATE
+      field per ticker to calibrate ticker-specific lags. Refine feature
+      construction window in v2 of panel build.
+
+  - id: TD-003
+    description: >
+      Dual Chronos-2 pipeline architecture — two separate pipelines approved
+      by researcher: (1) dividend series target, (2) total return target.
+      Both run on same walk-forward splits. Better-performing pipeline feeds
+      composite scoring model.
+    introduced_at: "session_002 — OSS cross-reference"
+    priority: resolved
+    resolution: >
+      Researcher approved dual pipeline on 2026-03-28. Pipeline 1 target:
+      V-001 (DVD_SH_12M). Pipeline 2 target: V-032 (TOT_RETURN_INDEX_GROSS_DVDS).
+      Notebooks: 03a (dividend series) and 03b (total return).
+      Comparison design documented in OSS cross-reference section above.
+
+  - id: TD-004
+    description: >
+      Beta divergence feature (beta_5y - beta_1y) suggested but not yet
+      in variable spec. May be more informative than either raw beta.
+    introduced_at: "session_002 — redundancy check"
+    priority: low
+    resolution_plan: >
+      Add as FE-XXX derived feature after initial Bloomberg pull confirms
+      both beta fields available. Test whether divergence adds predictive
+      power beyond individual beta values.

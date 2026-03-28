@@ -1,0 +1,845 @@
+# Research Agent Output — Bloomberg Variable Recommendations
+# Session: 002
+# Date: 2026-03-28
+# Source briefs: RB-001, RB-002, RB-003 (full text reviewed)
+# Universe: 101 tickers, Dividend_stocks.csv
+# Status: PENDING researcher approval + architecture review
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESEARCH AGENT SYNTHESIS NOTE
+# ─────────────────────────────────────────────────────────────────────────────
+# Three papers reviewed in full:
+#
+# RB-001 (Ivașcu 2023): Top predictors of dividend payment propensity via SHAP:
+#   Size (ln total assets) > Beta > Price/Book > Current Ratio > D/E > Price/Sales
+#   > Cash/Share > ROA > ROE. Profitability (ROA/ROE) surprisingly weak in
+#   cross-section but size and risk dominate. SMOTE required for cut-risk model.
+#
+# RB-002 (Jones, Moser & Wieland 2023): Gradient boosting on Penman-Zhang model.
+#   Top predictors of profitability change: G_NOA (growth in net operating assets)
+#   and RNOA (return on net operating assets). DuPont decomposition components
+#   (asset turnover change, profit margin change) both informative via ML even
+#   when OLS shows them insignificant. Accruals strongly predictive. Walk-forward
+#   CV essential — out-of-sample R² doubles vs OLS.
+#
+# RB-003 (Hanlon & Hoopes 2014): Tax sensitivity of payout. Key confounders:
+#   insider ownership fraction, C-Corp vs pass-through status, special dividend
+#   flag. These moderate dividend policy response to exogenous shocks.
+#
+# Cross-paper synthesis: The strongest Bloomberg-derivable variable set combines
+#   RB-001's size/risk/liquidity signals, RB-002's profitability structure signals
+#   (RNOA, G_NOA, DuPont components, accruals), and RB-003's ownership/structure
+#   confounders. RB-005 (Goyal-Welch) warns against raw yield as primary
+#   predictor — FCF-based and earnings-based features dominate.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 1: PRIMARY DIVIDEND VARIABLES
+# ─────────────────────────────────────────────────────────────────────────────
+
+primary_dividend_variables:
+
+  - var_id: V-001
+    name: dividend_per_share_ttm
+    bloomberg_field: DVD_SH_12M
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Core target variable input. Used to construct the dividend time series
+      fed into Chronos-2. Trailing 12M smooths seasonality in quarterly payers.
+    paper_support: [RB-001, RB-002]
+    leakage_note: Trailing — safe.
+    priority: critical
+
+  - var_id: V-002
+    name: dividend_yield
+    bloomberg_field: DVD_YLD
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Include as feature but per RB-005 (Goyal-Welch) do NOT use as primary
+      predictor. Out-of-sample predictive power for equity premium is nil.
+      Use as a confounder control and sector-relative feature only.
+    paper_support: [RB-005]
+    leakage_note: Trailing — safe.
+    priority: high
+
+  - var_id: V-003
+    name: dividend_growth_rate_1y
+    bloomberg_field: DVD_GRWTH_1Y
+    type: BDP
+    frequency: annual
+    history_start: "2008-01-01"
+    rationale: >
+      1-year DGR. Primary signal in Layer 2 of the scoring model (growth
+      trajectory). Directly operationalizable.
+    paper_support: [RB-001]
+    leakage_note: Annual — use prior fiscal year value only.
+    priority: critical
+
+  - var_id: V-004
+    name: dividend_growth_rate_3y
+    bloomberg_field: DVD_GRWTH_3Y
+    type: BDP
+    frequency: annual
+    history_start: "2008-01-01"
+    rationale: >
+      3-year annualized DGR. More stable than 1Y. Key composite score input.
+    paper_support: [RB-001]
+    leakage_note: Annual — safe.
+    priority: critical
+
+  - var_id: V-005
+    name: dividend_growth_rate_5y
+    bloomberg_field: DVD_GRWTH_5Y
+    type: BDP
+    frequency: annual
+    history_start: "2008-01-01"
+    rationale: >
+      5-year annualized DGR. Captures long-run commitment to dividend growth.
+      Aristocrat/Achiever identification proxy.
+    paper_support: [RB-001]
+    leakage_note: Annual — safe.
+    priority: critical
+
+  - var_id: V-006
+    name: payout_ratio_earnings
+    bloomberg_field: DVD_PAYOUT_RATIO
+    type: BDH
+    frequency: annual
+    history_start: "2008-01-01"
+    rationale: >
+      Earnings-based payout ratio. High payout relative to earnings signals
+      sustainability risk. RB-001 includes D/E and liquidity as strong
+      predictors; payout ratio complements.
+    paper_support: [RB-001, RB-002]
+    leakage_note: Annual — use prior fiscal year only.
+    priority: high
+
+  - var_id: V-007
+    name: consecutive_dividend_growth_years
+    bloomberg_field: DVD_CONSEC_GR_YRS
+    type: BDP
+    frequency: annual
+    history_start: "2008-01-01"
+    rationale: >
+      Count of consecutive years with dividend increases. Aristocrat proxy.
+      Strong signal of management commitment to dividend growth.
+    paper_support: [RB-001]
+    leakage_note: Annual — safe.
+    priority: high
+
+  - var_id: V-008
+    name: indicated_annual_dividend
+    bloomberg_field: DVD_SH_IND
+    type: BDP
+    frequency: snapshot
+    history_start: null
+    rationale: >
+      Current indicated annual dividend. Useful for current-state snapshot
+      at time of Bloomberg pull. Not for historical panel construction.
+    paper_support: []
+    leakage_note: Snapshot only — not for time-series feature.
+    priority: medium
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 2: PENMAN-ZHANG / RB-002 PROFITABILITY STRUCTURE VARIABLES
+# These are the strongest predictors from Jones et al. 2023 — G_NOA and RNOA
+# dominate; DuPont components and accruals are all informative via ML.
+# ─────────────────────────────────────────────────────────────────────────────
+
+profitability_structure_variables:
+
+  - var_id: V-009
+    name: return_on_net_operating_assets
+    bloomberg_field: RETURN_ON_ASSET
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      RNOA proxy (ROA). In RB-002, RNOA is the 2nd strongest predictor of
+      profitability change (RVI=70). Nonlinear relationship — ML captures
+      reversion effects at extreme values. Strong leakage-safe signal.
+    paper_support: [RB-002]
+    leakage_note: >
+      Use value from filing date prior to quarter-end. Reporting lag ~45 days.
+      Flag: LEAKAGE CHECK on rolling window construction.
+    priority: critical
+
+  - var_id: V-010
+    name: return_on_equity
+    bloomberg_field: RETURN_ON_EQ
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      ROE. In RB-001 SHAP analysis, ROE is among the weaker predictors of
+      dividend payment propensity, but RB-002 finds it informative in
+      gradient boosting via nonlinear interaction with G_NOA. Include.
+    paper_support: [RB-001, RB-002]
+    leakage_note: Use prior quarter filing. 45-day reporting lag.
+    priority: high
+
+  - var_id: V-011
+    name: net_operating_asset_growth
+    bloomberg_field: null
+    type: derived
+    frequency: quarterly
+    history_start: "2008-01-01"
+    derivation: >
+      (net_operating_assets_t - net_operating_assets_t-1) /
+      net_operating_assets_t-1
+      where net_operating_assets = total_assets - cash - total_liabilities + debt
+      Bloomberg inputs: AT (total assets), CHE (cash), LT (total liabilities),
+      SHORT_AND_LONG_TERM_DEBT
+    rationale: >
+      G_NOA is the SINGLE STRONGEST predictor in RB-002 (RVI=100 across all
+      test samples). Abnormal increases in net operating assets predict
+      profitability reversals. Must derive from Bloomberg balance sheet fields.
+      Critical to construct correctly — leakage risk high.
+    paper_support: [RB-002]
+    leakage_note: >
+      LEAKAGE CHECK: Use only balance sheet values from filings available
+      at time t. Do not use end-of-quarter values without confirming filing
+      lag. Flag to architecture agent for mandatory Check 1.
+    priority: critical
+
+  - var_id: V-012
+    name: profit_margin
+    bloomberg_field: GROSS_MARGIN
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Gross margin as profit margin proxy. RB-002: change in profit margin
+      (PM_CHG) is informative via ML even though OLS shows it insignificant.
+      Nonlinear — strong negative effect when PM growing >10%. Key DuPont
+      component.
+    paper_support: [RB-002]
+    leakage_note: Use operating margin (EBIT/Revenue) where available. Trailing.
+    priority: high
+
+  - var_id: V-013
+    name: asset_turnover
+    bloomberg_field: null
+    type: derived
+    frequency: quarterly
+    history_start: "2008-01-01"
+    derivation: >
+      Revenue_t / net_operating_assets_t-1
+      Bloomberg inputs: SALES_REV_TURN, net_operating_assets (derived from V-011)
+    rationale: >
+      Asset turnover change (ATO_CHG) is informative in RB-002 gradient
+      boosting — positive ATO_CHG predicts profitability improvement.
+      Convex relationship captured by ML. Derive from revenue and NOA.
+    paper_support: [RB-002]
+    leakage_note: >
+      LEAKAGE CHECK: Revenue from current quarter; NOA from prior quarter
+      filing. Confirm period alignment.
+    priority: high
+
+  - var_id: V-014
+    name: operating_accruals
+    bloomberg_field: null
+    type: derived
+    frequency: quarterly
+    history_start: "2008-01-01"
+    derivation: >
+      (net_income - operating_cash_flow) / net_operating_assets_t-1
+      Bloomberg inputs: NET_INCOME, CF_CASH_FROM_OPER,
+      net_operating_assets (derived)
+    rationale: >
+      Accruals (ACCR) 3rd strongest predictor in RB-002 (RVI=37). Higher
+      accruals predict lower forward profitability. Positive accruals have
+      stronger predictive impact than negative. Interaction with RNOA
+      is significant — high RNOA dampens accrual effect.
+    paper_support: [RB-002]
+    leakage_note: >
+      LEAKAGE CHECK: Use cash flow from prior filing period only.
+      Accrual quality flag: if abs(accruals) > 0.2 NOA, flag as outlier.
+    priority: high
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 3: SIZE AND RISK VARIABLES (RB-001 SHAP TOP PREDICTORS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+size_and_risk_variables:
+
+  - var_id: V-015
+    name: ln_total_assets
+    bloomberg_field: BS_TOT_ASSET
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Log total assets = firm size proxy. #1 predictor in RB-001 SHAP
+      analysis. Larger firms systematically more likely to pay and sustain
+      dividends. Strong nonlinear positive relationship with dividend propensity.
+    paper_support: [RB-001]
+    leakage_note: Use quarterly balance sheet value. Log-transform in feature engineering.
+    priority: critical
+
+  - var_id: V-016
+    name: market_cap
+    bloomberg_field: CUR_MKT_CAP
+    type: BDH
+    frequency: monthly
+    history_start: "2008-01-01"
+    rationale: >
+      Market-based size measure. Correlated with ln_total_assets but captures
+      market perception of firm quality. Use for universe ranking and
+      sector-relative normalization. Partially in CSV already.
+    paper_support: [RB-001]
+    leakage_note: Monthly — use quarter-end snapshot for panel construction.
+    priority: high
+
+  - var_id: V-017
+    name: beta_1y
+    bloomberg_field: BETA_RAW_1YR
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Beta = #2 predictor in RB-001 SHAP. Negative relationship with dividend
+      propensity — riskier firms choose to reinvest profits rather than pay
+      dividends. Strong, consistent signal across models.
+    paper_support: [RB-001]
+    leakage_note: Rolling 1Y beta — leakage-safe as long as calculated at quarter-end.
+    priority: critical
+
+  - var_id: V-018
+    name: beta_5y
+    bloomberg_field: BETA_RAW_5YR
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Longer-horizon beta. Smoother than 1Y. Use both for stability assessment
+      and as separate feature — their divergence signals regime change in risk.
+    paper_support: [RB-001]
+    leakage_note: Safe.
+    priority: medium
+
+  - var_id: V-019
+    name: price_to_book
+    bloomberg_field: PX_TO_BOOK_RATIO
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      P/B = #3 predictor in RB-001 SHAP. Investment opportunity proxy.
+      Higher P/B firms more likely to retain earnings for growth rather
+      than pay dividends. Key cross-sectional control.
+    paper_support: [RB-001]
+    leakage_note: Market price at quarter-end / book value from last filing. Safe.
+    priority: high
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 4: LIQUIDITY AND LEVERAGE VARIABLES (RB-001)
+# ─────────────────────────────────────────────────────────────────────────────
+
+liquidity_leverage_variables:
+
+  - var_id: V-020
+    name: current_ratio
+    bloomberg_field: CUR_RATIO
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Current ratio = #4 predictor in RB-001 SHAP. Liquidity proxy.
+      Counterintuitively, lower current ratio associated with dividend payment
+      — consistent with signaling theory (firms pay dividends to signal
+      quality even under liquidity constraints).
+    paper_support: [RB-001]
+    leakage_note: Balance sheet — use prior quarter filing.
+    priority: high
+
+  - var_id: V-021
+    name: debt_to_equity
+    bloomberg_field: TOT_DEBT_TO_TOT_EQY
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      D/E ratio = #5 predictor in RB-001 SHAP. High leverage firms still
+      pay dividends (signaling) but cut risk increases. Key confounder
+      for FCF payout sustainability analysis.
+    paper_support: [RB-001]
+    leakage_note: Balance sheet — prior quarter filing.
+    priority: high
+
+  - var_id: V-022
+    name: interest_coverage
+    bloomberg_field: EBIT_TO_INT_EXPENSE
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      EBIT / interest expense. Debt service competes with dividends. Low
+      coverage predicts higher cut risk. Not in RB-001 directly but
+      mechanically linked to leverage sustainability.
+    paper_support: []
+    leakage_note: Income statement — quarterly trailing.
+    priority: high
+
+  - var_id: V-023
+    name: free_cash_flow
+    bloomberg_field: CF_FREE_CASH_FLOW
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      FCF is preferred denominator for payout sustainability. FCF payout
+      ratio (dividends / FCF) is more informative than earnings payout
+      because FCF is harder to manipulate. Used to derive fcf_payout_ratio.
+      Critical for cut-risk model.
+    paper_support: [RB-002]
+    leakage_note: >
+      LEAKAGE CHECK: Use cash flow statement from prior quarter filing.
+      45-day reporting lag. Flag as LEAKAGE CHECK in feature derivation.
+    priority: critical
+
+  - var_id: V-024
+    name: operating_cash_flow
+    bloomberg_field: CF_CASH_FROM_OPER
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Required for accruals derivation (V-014). Also used for cash_div
+      coverage ratio. Operating cash flow stability (low CoV over 8Q)
+      is a direct feature from RB-002 methodology.
+    paper_support: [RB-002]
+    leakage_note: Prior quarter filing. Reporting lag applies.
+    priority: critical
+
+  - var_id: V-025
+    name: cash_and_equivalents
+    bloomberg_field: CASH_AND_NEAR_CASH_ITEM
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Cash/Share is included in RB-001 feature set. Cash buffer supports
+      dividend maintenance during earnings downturns. Also needed for
+      G_NOA derivation (V-011).
+    paper_support: [RB-001]
+    leakage_note: Balance sheet — prior quarter.
+    priority: high
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 5: INCOME STATEMENT VARIABLES
+# ─────────────────────────────────────────────────────────────────────────────
+
+income_statement_variables:
+
+  - var_id: V-026
+    name: revenue
+    bloomberg_field: SALES_REV_TURN
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Required for profit margin and asset turnover derivation (V-012, V-013).
+      Revenue growth YoY is also a signal of business momentum supporting
+      dividend sustainability.
+    paper_support: [RB-002]
+    leakage_note: Income statement — prior quarter filing.
+    priority: critical
+
+  - var_id: V-027
+    name: net_income
+    bloomberg_field: NET_INCOME
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Required for accruals derivation (V-014) and earnings persistence
+      score (CoV of NI over 8Q). In RB-002, NI-based accruals are the
+      3rd strongest predictor. Also denominator for payout ratio.
+    paper_support: [RB-002]
+    leakage_note: Income statement — prior quarter filing.
+    priority: critical
+
+  - var_id: V-028
+    name: ebitda
+    bloomberg_field: EBITDA
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      EBITDA proxy for operational cash generation before financing.
+      Used as alternative FCF numerator and for EV/EBITDA valuation signal.
+    paper_support: []
+    leakage_note: Prior quarter filing.
+    priority: medium
+
+  - var_id: V-029
+    name: eps_diluted
+    bloomberg_field: IS_DILUTED_EPS
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Required for earnings payout ratio and EBR construction from RB-004
+      (analyst EPS vs actual). Also used to flag special dividend events
+      (Hanlon & Hoopes, RB-003): unusually high EPS-to-dividend ratio signals
+      special payout pressure.
+    paper_support: [RB-003, RB-004]
+    leakage_note: Prior quarter filing.
+    priority: high
+
+  - var_id: V-030
+    name: total_assets
+    bloomberg_field: BS_TOT_ASSET
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Balance sheet total assets. Required for G_NOA derivation and asset
+      turnover. Also used for ln_total_assets (V-015). Note: same field as
+      V-015 — pull once, derive both.
+    paper_support: [RB-001, RB-002]
+    leakage_note: Balance sheet — prior quarter filing.
+    priority: critical
+
+  - var_id: V-031
+    name: total_debt
+    bloomberg_field: SHORT_AND_LONG_TERM_DEBT
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Required for G_NOA derivation, D/E ratio, and interest coverage.
+      Debt level is central to dividend sustainability — high debt firms
+      face competing claims on FCF.
+    paper_support: [RB-001, RB-002]
+    leakage_note: Balance sheet — prior quarter filing.
+    priority: critical
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 6: PRICE AND RETURN VARIABLES
+# ─────────────────────────────────────────────────────────────────────────────
+
+price_return_variables:
+
+  - var_id: V-032
+    name: total_return_index
+    bloomberg_field: TOT_RETURN_INDEX_GROSS_DVDS
+    type: BDH
+    frequency: monthly
+    history_start: "2008-01-01"
+    rationale: >
+      PRIMARY TARGET VARIABLE INPUT. Total return including dividends.
+      Forward 12M total return is the target variable for the scoring model.
+      Must be carefully lagged — never use as a feature, only as target.
+    paper_support: [RB-002]
+    leakage_note: >
+      CRITICAL LEAKAGE RISK. Flag to architecture agent for mandatory
+      Check 1. Target variable must be lagged +4 quarters from feature
+      construction date. Never include as feature.
+    priority: critical
+
+  - var_id: V-033
+    name: adjusted_close_price
+    bloomberg_field: PX_LAST
+    type: BDH
+    frequency: monthly
+    history_start: "2008-01-01"
+    rationale: >
+      Adjusted close price. Used for yield calculation, P/E construction,
+      and momentum features. Pull monthly, sample at quarter-end.
+    paper_support: []
+    leakage_note: Use quarter-end value only.
+    priority: high
+
+  - var_id: V-034
+    name: pe_ratio
+    bloomberg_field: PE_RATIO
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      P/E ratio. Valuation signal. In RB-001, Price/Sales is included
+      as a predictor. P/E provides complementary earnings-relative
+      valuation view.
+    paper_support: [RB-001]
+    leakage_note: Market price at quarter-end / trailing earnings. Safe.
+    priority: medium
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 7: ANALYST ESTIMATE VARIABLES (RB-004 — Bordalo et al.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+analyst_estimate_variables:
+
+  - var_id: V-035
+    name: analyst_eps_consensus
+    bloomberg_field: BEST_EPS
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Consensus analyst EPS forecast. From RB-004, Expectation-Based Returns
+      (EBRs) constructed from analyst forecasts predict realized returns and
+      explain cross-sectional return spreads. Forward-looking signal that
+      complements trailing fundamentals. Coverage from ~2002 onward.
+    paper_support: [RB-004]
+    leakage_note: >
+      LEAKAGE CHECK: Use only the consensus estimate available AT time t.
+      Do not use forward-revised estimates. Bloomberg stores vintage estimates
+      — confirm correct vintage pull methodology with coding agent.
+    priority: high
+
+  - var_id: V-036
+    name: analyst_ltg_estimate
+    bloomberg_field: BEST_LTG_EPS
+    type: BDH
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      Long-term EPS growth estimate (analyst consensus). From RB-004,
+      cross-sectional variation in LTG predicts return spreads. Captures
+      market expectations for durable growth supporting dividend increases.
+    paper_support: [RB-004]
+    leakage_note: >
+      LEAKAGE CHECK: Same vintage issue as V-035. Use estimate available
+      at time t only.
+    priority: medium
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 8: OWNERSHIP / GOVERNANCE CONFOUNDERS (RB-003 — Hanlon & Hoopes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ownership_governance_variables:
+
+  - var_id: V-037
+    name: institutional_ownership_pct
+    bloomberg_field: INST_HOLDINGS_PCT
+    type: BDP
+    frequency: quarterly
+    history_start: "2008-01-01"
+    rationale: >
+      From RB-003: insider ownership fraction moderates dividend policy
+      response to tax changes. Institutional ownership is a key confounder
+      — high institutional ownership by tax-sensitive investors amplifies
+      payout response. Use as a sector-relative confounder, not primary
+      predictor.
+    paper_support: [RB-003]
+    leakage_note: Quarterly snapshot — safe.
+    priority: medium
+
+  - var_id: V-038
+    name: special_dividend_flag
+    bloomberg_field: DVD_CASH_AMT
+    type: BDH
+    frequency: per_event
+    history_start: "2008-01-01"
+    rationale: >
+      Per-event dividend amounts. From RB-003: special dividends (non-regular)
+      signal one-time payout pressure, NOT sustainable growth. Must identify
+      special vs regular payments by comparing event amounts to established
+      schedules. Special dividends should NOT be treated as DGR signals.
+    paper_support: [RB-003]
+    leakage_note: >
+      LEAKAGE CHECK: Event-level data. Flag events as special vs regular
+      using prior 4Q payment schedule. Identify specials as payments >2x
+      regular quarterly amount or coded as extra/year-end by Bloomberg.
+    priority: high
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 9: MACRO CONFOUNDERS (pull separately, merge on date)
+# ─────────────────────────────────────────────────────────────────────────────
+
+macro_confounder_variables:
+
+  - var_id: V-039
+    name: ten_year_treasury_yield
+    bloomberg_field: USGG10YR Index
+    type: BDH
+    frequency: monthly
+    history_start: "2008-01-01"
+    rationale: >
+      Rising rates compress dividend stock valuations and raise the hurdle
+      rate for dividend yield attractiveness. Key macro confounder for
+      sector-relative yield normalization. From RB-003: tax rate environment
+      is central — rate environment is the macro analog.
+    paper_support: [RB-003]
+    leakage_note: Month-end value. Safe.
+    priority: critical
+
+  - var_id: V-040
+    name: fed_funds_rate
+    bloomberg_field: FDTR Index
+    type: BDH
+    frequency: monthly
+    history_start: "2008-01-01"
+    rationale: >
+      Policy rate. Drives cost of capital and dividend stock relative
+      attractiveness. Chronos-2 covariate — pass as known future covariate
+      when Fed futures provide forward guidance.
+    paper_support: []
+    leakage_note: Month-end. Safe.
+    priority: high
+
+  - var_id: V-041
+    name: vix
+    bloomberg_field: VIX Index
+    type: BDH
+    frequency: monthly
+    history_start: "2008-01-01"
+    rationale: >
+      Market volatility index. Risk-off environments drive dividend stock
+      flows. Beta (V-017) captures firm-level risk; VIX captures market
+      risk environment. Chronos-2 covariate.
+    paper_support: []
+    leakage_note: Month-end. Safe.
+    priority: medium
+
+  - var_id: V-042
+    name: cpi_yoy
+    bloomberg_field: CPI YOY Index
+    type: BDH
+    frequency: monthly
+    history_start: "2008-01-01"
+    rationale: >
+      Inflation affects real dividend value and rate policy. Macro context
+      for walk-forward model. Also relevant for real vs nominal return target
+      construction.
+    paper_support: []
+    leakage_note: Published with ~30 day lag. Confirm lag before use.
+    priority: medium
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 10: SECTOR / IDENTITY FIELDS
+# ─────────────────────────────────────────────────────────────────────────────
+
+identity_and_sector_fields:
+
+  - var_id: V-043
+    name: gics_sector
+    bloomberg_field: GICS_SECTOR_NAME
+    type: BDP
+    frequency: snapshot
+    history_start: null
+    rationale: >
+      Critical confounder. Utilities and REITs mechanically have higher
+      yields. All yield and DGR metrics must be normalized sector-relative.
+      RB-001 finds size dominates within sector; cross-sector comparisons
+      require sector controls.
+    paper_support: [RB-001]
+    leakage_note: Snapshot — safe.
+    priority: critical
+
+  - var_id: V-044
+    name: gics_industry
+    bloomberg_field: GICS_INDUSTRY_NAME
+    type: BDP
+    frequency: snapshot
+    history_start: null
+    rationale: >
+      Industry-level granularity below sector. Useful for within-sector
+      peer group construction.
+    paper_support: []
+    leakage_note: Snapshot — safe.
+    priority: medium
+
+  - var_id: V-045
+    name: country_iso
+    bloomberg_field: CNTRY_OF_INCORPORATION
+    type: BDP
+    frequency: snapshot
+    history_start: null
+    rationale: >
+      Primary 76-ticker universe is US-listed. Five tickers are incorporated
+      outside the US but trade as primary NYSE listings (UL, SCCO, CB, ETN,
+      LIN). Country field retained to flag these for sensitivity checks.
+      Non-US ADRs excluded from primary model per researcher decision.
+    paper_support: []
+    leakage_note: Snapshot — safe.
+    priority: medium
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UNIVERSE NOTE
+# ─────────────────────────────────────────────────────────────────────────────
+
+universe_observations:
+  total_raw_tickers: 101
+  primary_model_tickers: 76
+  excluded_non_us: 24
+  decision: "Researcher approved: trim to US-listed primary model. Non-US expansion deferred to phase 2."
+
+  excluded_tickers:
+    - {ticker: TSM, country: Taiwan, reason: non_us}
+    - {ticker: AMX, country: Mexico, reason: non_us}
+    - {ticker: AZN, country: UK, reason: non_us}
+    - {ticker: ASML, country: Netherlands, reason: non_us}
+    - {ticker: TM, country: Japan, reason: non_us}
+    - {ticker: BABA, country: China, reason: non_us}
+    - {ticker: NVS, country: Switzerland, reason: non_us}
+    - {ticker: HSBC, country: UK, reason: non_us}
+    - {ticker: SHEL, country: UK, reason: non_us}
+    - {ticker: RY, country: Canada, reason: non_us}
+    - {ticker: SAP, country: Germany, reason: non_us}
+    - {ticker: MUFG, country: Japan, reason: non_us}
+    - {ticker: FMX, country: Mexico, reason: non_us}
+    - {ticker: TV, country: Mexico, reason: non_us}
+    - {ticker: BHP, country: Australia, reason: non_us}
+    - {ticker: TTE, country: France, reason: non_us}
+    - {ticker: NVO, country: Denmark, reason: non_us}
+    - {ticker: SAN, country: Spain, reason: non_us}
+    - {ticker: TD, country: Canada, reason: non_us}
+    - {ticker: CX, country: Mexico, reason: non_us}
+    - {ticker: HDB, country: India, reason: non_us}
+    - {ticker: BUD, country: Belgium, reason: non_us}
+    - {ticker: BTI, country: UK, reason: non_us}
+    - {ticker: PBR, country: Brazil, reason: non_us}
+
+  foreign_incorporated_us_listed:
+    note: >
+      Five tickers in the primary 76 are incorporated outside the US but
+      trade as primary listings on US exchanges, report under US GAAP/SEC
+      standards, and are NOT ADRs. Included in primary universe.
+    tickers:
+      - {ticker: UL, incorporated: UK, exchange: NYSE, notes: Unilever — UK incorporated, US primary listing}
+      - {ticker: SCCO, incorporated: Peru, exchange: NYSE, notes: Southern Copper — Peruvian incorporated, US listed}
+      - {ticker: CB, incorporated: Switzerland, exchange: NYSE, notes: Chubb — Swiss incorporated, US listed}
+      - {ticker: ETN, incorporated: Ireland, exchange: NYSE, notes: Eaton — Irish incorporated, US listed}
+      - {ticker: LIN, incorporated: Ireland, exchange: NYSE, notes: Linde — Irish incorporated, US listed}
+
+  reit_or_utility_tickers:
+    - {ticker: NEE, sector: Utilities}
+    - {ticker: WELL, sector: REIT}
+  note_reits: >
+    Per RB-003 (Hanlon & Hoopes), REIT dividends do NOT qualify for
+    preferential tax rates and behave differently. WELL and NEE must
+    be flagged with is_reit and is_utility binary columns respectively.
+    Yield normalization applied within-sector only.
+
+  universe_file_primary: data/universe/Dividend_stocks_US_76.csv
+  universe_file_full: data/universe/Dividend_stocks.csv
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUMMARY COUNTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+summary:
+  total_variables: 45
+  critical_priority: 14
+  high_priority: 17
+  medium_priority: 7
+  low_priority: 0
+  bdh_time_series: 34
+  bdp_point_in_time: 7
+  derived: 4
+  macro_separate_pull: 4
+  primary_papers: [RB-001, RB-002, RB-003, RB-004]
+  cautionary_paper: RB-005
+  architecture_flags:
+    - "V-011 (G_NOA): highest leakage risk — mandatory Check 1"
+    - "V-023 (FCF): reporting lag must be documented"
+    - "V-032 (total_return_index): target variable — NEVER use as feature"
+    - "V-035/V-036 (analyst estimates): vintage pull methodology TBD"
+    - "Non-US ADR dividend treatment: architecture review required"

@@ -1,0 +1,296 @@
+# OSS Agent Output — Initial Tool Sweep
+# Session: 001
+# Date: 2026-03-28
+# Briefs: TB-001 through TB-005
+# Status: researcher_decision populated per researcher instruction
+
+tool_briefs:
+
+- tool_brief_id: TB-001
+  name: Chronos-2
+  type: forecasting_model
+  source:
+    platform: HuggingFace
+    url: https://huggingface.co/amazon/chronos-2
+    model_id: amazon/chronos-2
+    last_updated: "2025-10"
+    stars: 4800
+    license: Apache 2.0
+  architecture: >
+    Encoder-only Transformer (T5 encoder-based), patch tokenization,
+    group attention mechanism for in-context learning across related series.
+    120M parameters.
+  pretraining_data: >
+    Combination of real-world public datasets plus large-scale synthetic data
+    (Gaussian processes). Diverse domains — not specifically financial time series.
+  probabilistic_output: true
+  horizon_fit:
+    min_steps: 1
+    max_steps: 64
+    suitable_for_project: true
+    notes: >
+      4–12 quarter horizon is well within capability. Native quantile forecasting
+      at arbitrary quantile levels (e.g. 0.1, 0.5, 0.9). 300+ forecasts/sec on
+      A10G GPU — Colab A100 will be faster. Official Colab quickstart notebook
+      exists at amazon-science/chronos-forecasting repo.
+  covariate_support: multivariate
+  fine_tuning_support: true
+  colab_compatibility:
+    estimated_vram_gb: 2.0
+    a100_compatible: true
+    notes: >
+      Extremely memory-efficient at 120M params. Fine-tuning via AutoGluon
+      TimeSeriesPredictor with fine_tune=True; full fine-tune mode available.
+      AutoGluon integration is the cleanest path for our use case.
+  use_case_fit:
+    dividend_series_forecasting: strong
+    cut_risk_classification: weak
+    macro_covariate_integration: strong
+  recommendation: evaluate_first
+  recommendation_rationale: >
+    Best-in-class benchmark performance (fev-bench, GIFT-Eval, Chronos Bench II
+    as of Dec 2025). Covariate support in Chronos-2 is a major upgrade from v1 —
+    macro series (rates, VIX) and fundamentals can be passed alongside the
+    dividend series natively. Apache 2.0 license, excellent docs, Colab-native.
+  integration_notes: >
+    pip install autogluon.timeseries chronos-forecasting
+    Use Chronos2Pipeline for direct inference or AutoGluon TimeSeriesPredictor
+    for fine-tuning. Panel data must be structured as (id, timestamp, target)
+    with optional covariate columns. Quarterly frequency supported natively.
+  flags:
+    - ACTIVELY_MAINTAINED
+    - COLAB_QUICKSTART_AVAILABLE
+    - NATIVE_COVARIATE_SUPPORT
+    - BENCHMARK_SOTA_DEC2025
+  informed_agents: [coding, architecture]
+  researcher_decision: adopted
+
+- tool_brief_id: TB-002
+  name: Moirai 2.0
+  type: forecasting_model
+  source:
+    platform: HuggingFace / GitHub
+    url: https://github.com/SalesforceAIResearch/uni2ts
+    model_id: "Salesforce/moirai2 (check HF for latest size variants)"
+    last_updated: "2025-02"
+    stars: 1600
+    license: Apache 2.0
+  architecture: >
+    Decoder-only Transformer, quantile forecasting head, multi-token prediction,
+    any-variate attention mechanism.
+  pretraining_data: >
+    LOTSA dataset (27B data points, open archive). Also trained on ~2.15M
+    Salesforce internal telemetry series. Diverse domains; not specifically
+    financial.
+  probabilistic_output: true
+  horizon_fit:
+    min_steps: 1
+    max_steps: 4096
+    suitable_for_project: true
+    notes: >
+      Supports very long context windows (L_max=4096). Any-variate attention
+      means it can handle the full cross-sectional panel natively — joint
+      modeling of multiple tickers as multivariate input. Top-5 on GIFT-Eval
+      among pretrained models.
+  covariate_support: multivariate
+  fine_tuning_support: true
+  colab_compatibility:
+    estimated_vram_gb: 4.0
+    a100_compatible: true
+    notes: >
+      Base and large sizes available. Fine-tuning module enhanced Aug 2025.
+      More memory-intensive than Chronos-2 but A100 handles comfortably.
+      Install via uni2ts pip package.
+  use_case_fit:
+    dividend_series_forecasting: strong
+    cut_risk_classification: weak
+    macro_covariate_integration: strong
+  recommendation: worth_testing
+  recommendation_rationale: >
+    Strong multivariate foundation and long context window are attractive.
+    Second-best option behind Chronos-2 on current benchmarks, but its
+    panel-native any-variate design could outperform on this specific
+    cross-sectional problem. Worth benchmarking against TB-001 if Chronos-2
+    fine-tuning results are insufficient.
+  integration_notes: >
+    pip install uni2ts
+    Uses GluonTS PandasDataset interface. Fine-tune module documented on
+    GitHub with LSF benchmark examples. LOTSA dataset available if needed.
+  flags:
+    - ACTIVELY_MAINTAINED
+    - PANEL_NATIVE_ARCHITECTURE
+    - ICML_2024_ORAL
+  informed_agents: [coding, architecture]
+  researcher_decision: deferred
+
+- tool_brief_id: TB-003
+  name: TimesFM 2.5
+  type: forecasting_model
+  source:
+    platform: GitHub / HuggingFace
+    url: https://github.com/google-research/timesfm
+    model_id: google/timesfm-2.5-200m-pytorch
+    last_updated: "2025-10"
+    stars: 3900
+    license: Apache 2.0
+  architecture: >
+    Decoder-only Transformer, patch-based input, residual block output mapping.
+    200M parameters.
+  pretraining_data: >
+    Very large corpus — largest training dataset among public foundation models
+    per published comparisons. General time series, not domain-specific.
+  probabilistic_output: true
+  horizon_fit:
+    min_steps: 1
+    max_steps: 256
+    suitable_for_project: true
+    notes: >
+      v2.5 adds covariate support (XReg) and continuous quantile head.
+      12-quarter horizon is within limit. Flax version (faster inference)
+      in development as of Mar 2026.
+  covariate_support: exogenous_only
+  fine_tuning_support: true
+  colab_compatibility:
+    estimated_vram_gb: 5.0
+    a100_compatible: true
+    notes: >
+      200M params — heavier than Chronos-2. Google's production-tested
+      pedigree builds confidence but compute cost is real. PyTorch version
+      stable; Flax version under construction.
+  use_case_fit:
+    dividend_series_forecasting: moderate
+    cut_risk_classification: weak
+    macro_covariate_integration: moderate
+  recommendation: worth_testing
+  recommendation_rationale: >
+    Ranked above Moirai on project fit per researcher assessment. Google's
+    large pretraining corpus could generalize well. Covariate support is more
+    limited than Chronos-2 (exogenous only, not full multivariate) and
+    benchmark performance trails Chronos-2 as of late 2025. Computationally
+    heavy — verify A100 headroom before activating. Best used as comparison
+    model rather than primary forecaster.
+  integration_notes: >
+    pip install timesfm
+    Use timesfm.TimesFM_2p5_200M_torch.from_pretrained()
+    XReg covariate interface documented in GitHub README.
+    Note: repo under active construction as of project start date.
+  flags:
+    - ACTIVELY_MAINTAINED
+    - GOOGLE_PRODUCTION_TESTED
+    - COVARIATE_SUPPORT_LIMITED
+    - COMPUTATIONALLY_HEAVY
+  informed_agents: [coding, architecture]
+  researcher_decision: deferred
+
+- tool_brief_id: TB-004
+  name: NeuralForecast (Nixtla)
+  type: library
+  source:
+    platform: GitHub / PyPI
+    url: https://github.com/Nixtla/neuralforecast
+    model_id: null
+    last_updated: "2026-03"
+    stars: 3600
+    license: Apache 2.0
+  architecture: >
+    Library wrapping 30+ neural forecasting architectures: NBEATS, NHITS,
+    TFT (Temporal Fusion Transformer), PatchTST, iTransformer, DeepAR,
+    TimeLLM, StemGNN, and others. Unified sklearn-style API.
+  pretraining_data: >
+    Models are trained from scratch on your data. This is NOT a pretrained
+    foundation model library. Requires sufficient historical data per series.
+    Advantage: can train specifically on proprietary Bloomberg fundamentals.
+  probabilistic_output: true
+  horizon_fit:
+    min_steps: 1
+    max_steps: unlimited
+    suitable_for_project: true
+    notes: >
+      Horizon is user-specified. TFT and DeepAR are particularly well-suited:
+      TFT natively handles static covariates (sector, ticker metadata) and
+      time-varying known/unknown inputs. DeepAR produces well-calibrated
+      probabilistic forecasts. Walk-forward CV built in via cross_validation().
+  covariate_support: multivariate
+  fine_tuning_support: true
+  colab_compatibility:
+    estimated_vram_gb: 2.0
+    a100_compatible: true
+    notes: >
+      PyTorch Lightning backend. Memory scales with model — NBEATS/NHITS run
+      on CPU; TFT/iTransformer benefit from GPU. Current release v3.1.5 (Mar 2026).
+  use_case_fit:
+    dividend_series_forecasting: strong
+    cut_risk_classification: weak
+    macro_covariate_integration: strong
+  recommendation: worth_testing
+  recommendation_rationale: >
+    Primary value proposition for this project: training from scratch on
+    proprietary Bloomberg data is a genuine differentiator. TFT handles
+    static covariates (sector, market cap) naturally. Built-in walk-forward
+    CV directly implements our evaluation protocol. Key risk: ~60–70
+    quarterly observations per ticker is short for train-from-scratch models —
+    performance vs. zero-shot foundation models should be evaluated empirically.
+  integration_notes: >
+    pip install neuralforecast
+    NeuralForecast(models=[...], freq='QE')
+    Walk-forward: nf.cross_validation(df, n_windows=N, step_size=1)
+    Panel structure: unique_id (ticker), ds (date), y (target), + covariates
+  flags:
+    - ACTIVELY_MAINTAINED
+    - WALK_FORWARD_CV_BUILTIN
+    - TRAIN_FROM_SCRATCH
+    - SHORT_SERIES_RISK_ASSESS_EMPIRICALLY
+  informed_agents: [coding, architecture]
+  researcher_decision: adopted
+
+- tool_brief_id: TB-005
+  name: Prophet (Meta)
+  type: forecasting_model
+  source:
+    platform: GitHub / PyPI
+    url: https://github.com/facebook/prophet
+    model_id: null
+    last_updated: "2023-11"
+    stars: 18000
+    license: MIT
+  architecture: >
+    Additive decomposition model (trend + seasonality + holidays).
+    Stan backend. Not a neural network.
+  pretraining_data: >
+    No pretraining — fits to individual series. No Bloomberg data required.
+  probabilistic_output: true
+  horizon_fit:
+    min_steps: 1
+    max_steps: unlimited
+    suitable_for_project: true
+    notes: >
+      Designed for business time series with strong seasonality. Quarterly
+      dividend series have weak seasonality, limiting Prophet's main advantage.
+      Uncertainty intervals via Monte Carlo sampling.
+  covariate_support: exogenous_only
+  fine_tuning_support: false
+  colab_compatibility:
+    estimated_vram_gb: 0.0
+    a100_compatible: true
+    notes: CPU-only. Trivially fast. No GPU needed.
+  use_case_fit:
+    dividend_series_forecasting: moderate
+    cut_risk_classification: weak
+    macro_covariate_integration: weak
+  recommendation: worth_testing
+  recommendation_rationale: >
+    Value is as an interpretable baseline only. Decomposition output
+    (trend, seasonality) is human-readable and useful for sanity-checking
+    foundation model outputs. Not expected to outperform Chronos-2 on this
+    problem — quarterly dividend series lack the daily/weekly seasonality
+    Prophet is optimized for.
+  integration_notes: >
+    pip install prophet
+    Fits one series at a time — requires loop over tickers.
+    No built-in walk-forward CV — implement manually.
+  flags:
+    - LOW_MAINTENANCE
+    - INTERPRETABLE_BASELINE_ONLY
+    - NO_GPU_REQUIRED
+  informed_agents: [coding]
+  researcher_decision: deferred

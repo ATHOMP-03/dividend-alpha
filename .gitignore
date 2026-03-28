@@ -1,0 +1,18 @@
+# Data — Bloomberg exports and processed files never leave local machine
+data/
+
+# Local reference library — paywalled PDFs and annotations
+references/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store

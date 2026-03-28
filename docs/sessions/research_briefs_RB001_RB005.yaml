@@ -1,0 +1,272 @@
+# Research Agent Output — Initial Literature Sweep
+# Session: 001
+# Date: 2026-03-28
+# Briefs: RB-001 through RB-005
+# Themes: Methodology (x2), Instrumental Variables (x1), Predictive Variables (x2)
+
+research_briefs:
+
+- research_brief_id: RB-001
+  theme: methodology
+  paper:
+    title: "Understanding Dividend Puzzle Using Machine Learning"
+    authors: ["Ivașcu, Codruț-Florin"]
+    year: 2023
+    source: "Journal (Computational Economics, Springer)"
+    url_or_doi: "https://doi.org/10.1007/s10614-023-10439-7"
+    access: paywalled
+    local_path: "references/pdfs/RB-001_ivascu_2023_dividend_puzzle_ml.pdf"
+  key_finding: >
+    Applies PCA plus multiple ML classifiers (XGBoost, RF, SVM, neural nets)
+    with resampling to predict dividend payment probability. Firm size is the
+    single most informative determinant — larger, less risky firms are
+    systematically more likely to pay dividends. Addresses class imbalance
+    and metric selection critiques of earlier ML dividend studies by proposing
+    a rigorous multi-metric protocol (F1, AUC, not accuracy alone).
+  operationalizable_variables:
+    - variable_name: log_market_cap
+      definition: Log of market capitalization at quarter-end
+      bloomberg_field_candidate: CUR_MKT_CAP
+      derivation_notes: >
+        Log-transform to reduce skew. Key finding: strongest single predictor
+        of dividend initiation and continuation.
+    - variable_name: firm_risk_composite
+      definition: Composite of beta, return volatility, and leverage as risk proxy
+      bloomberg_field_candidate: "BETA_RAW_1YR + SHORT_AND_LONG_TERM_DEBT"
+      derivation_notes: >
+        Construct as PCA-weighted composite or z-score sum. Paper finds
+        lower-risk firms more likely to pay.
+  iv_candidates: []
+  methodological_notes: >
+    PCA for dimensionality reduction before ML — directly applicable to our
+    feature set. SMOTE for class imbalance in the dividend-cut classifier
+    (minority class). Multi-metric evaluation protocol (F1, AUC) transfers
+    directly to our cut-risk model. Walk-forward validation is implicitly
+    required but not formally described — a gap we should close.
+  limitations: >
+    Non-US sample. Class imbalance treatment is the primary contribution over
+    prior work. Size finding may be less novel for a US large-cap universe
+    where all firms are already large — more relevant as a within-universe
+    ranking variable than a binary predictor.
+  priority: high
+  flag: "PAYWALLED — retrieve via school access"
+
+- research_brief_id: RB-002
+  theme: methodology
+  paper:
+    title: "Machine Learning and the Prediction of Changes in Profitability"
+    authors: ["Jones, Stewart"]
+    year: 2023
+    source: "Journal (Contemporary Accounting Research, Wiley)"
+    url_or_doi: "https://doi.org/10.1111/1911-3846.12888"
+    access: paywalled
+    local_path: "references/pdfs/RB-002_jones_2023_ml_profitability.pdf"
+  key_finding: >
+    Gradient boosting and random forests substantially outperform OLS in
+    predicting next-period profitability changes using accounting fundamentals.
+    ML captures nonlinear relationships and high-order interaction effects
+    that linear models miss. Benchmarks against Penman-Zhang structural
+    profitability model. Chen et al. (2022) referenced herein predict earnings
+    changes using 8,000 XBRL filings and 12,000+ features with gradient
+    boosting — the most extreme version of the high-dimensional ML approach.
+  operationalizable_variables:
+    - variable_name: roe_change_1q
+      definition: Quarter-over-quarter change in return on equity
+      bloomberg_field_candidate: RETURN_ON_EQ
+      derivation_notes: >
+        First difference. Profitability momentum is a strong predictor of
+        forward payout capacity. LEAKAGE NOTE: use value reported in prior
+        quarter filing only.
+    - variable_name: earnings_persistence_score
+      definition: Rolling coefficient of variation of net income over prior 8 quarters
+      bloomberg_field_candidate: NET_INCOME
+      derivation_notes: >
+        Lower CoV = more persistent earnings = higher dividend sustainability.
+        Trailing window is leakage-safe.
+  iv_candidates: []
+  methodological_notes: >
+    Gradient boosting (XGBoost/LightGBM) as workhorse for tabular financial
+    prediction — directly applicable to our cut-risk classifier and composite
+    score weighting. Feature importance from gradient boosting can replace
+    arbitrary weight assignments in our composite score. Walk-forward CV
+    explicitly recommended — this is precisely our evaluation protocol.
+  limitations: >
+    Focuses on profitability changes, not dividends directly. However,
+    dividends are downstream of profitability so methodology transfers cleanly.
+    US-listed firms sample matches our universe.
+  priority: high
+  flag: "PAYWALLED — retrieve via school access. Key methodological paper for cut-risk model."
+
+- research_brief_id: RB-003
+  theme: instrumental_vars
+  paper:
+    title: >
+      What Do Firms Do When Dividend Tax Rates Change?
+      An Examination of Alternative Payout Responses
+    authors: ["Hanlon, Michelle", "Hoopes, Jeffrey L."]
+    year: 2014
+    source: "Journal (Journal of Financial Economics)"
+    url_or_doi: "https://doi.org/10.1016/j.jfineco.2014.05.007"
+    access: paywalled
+    local_path: "references/pdfs/RB-003_hanlon_hoopes_2014_dividend_tax.pdf"
+  key_finding: >
+    Uses the anticipated 2013 JGTRRA expiration — an expected large dividend
+    tax rate increase from 15% to up to 43.4% — as a cleaner natural
+    experiment than the 2003 tax cut (confounded by post-recession earnings
+    recovery). Firms significantly accelerate special dividend payments in
+    the narrow pre-deadline window. The C-Corp vs. S-Corp structure creates
+    a clean DiD treatment/control split. Placebo tests using REIT dividends
+    (ineligible for preferential rates) validate causal interpretation.
+  operationalizable_variables:
+    - variable_name: is_c_corp
+      definition: Binary — firm organized as C-Corp (dividend tax-sensitive) vs. pass-through
+      bloomberg_field_candidate: null
+      derivation_notes: >
+        Available from SEC filings or Compustat. Used as treatment indicator
+        in DiD designs around tax law changes.
+    - variable_name: special_dividend_flag
+      definition: Binary — firm paid a special (non-regular) dividend in the quarter
+      bloomberg_field_candidate: "DVD_CASH_AMT (per-event, identify non-scheduled payments)"
+      derivation_notes: >
+        Identify by comparing per-event amounts to regular schedule. Special
+        dividends signal one-time payout, not sustainable growth.
+    - variable_name: institutional_ownership_pct
+      definition: Fraction of shares held by tax-sensitive institutions
+      bloomberg_field_candidate: "INST_HOLDINGS_PCT or EQY_INST_PCT"
+      derivation_notes: >
+        Moderates dividend policy response to tax changes. High institutional
+        ownership by tax-sensitive investors amplifies response.
+  iv_candidates:
+    - instrument: "JGTRRA 2003 dividend tax cut (May 2003)"
+      mechanism: >
+        Exogenous reduction in top marginal dividend tax rate from ~38.6% to 15%.
+        Affected C-Corps differentially from S-Corps and tax-exempt entities
+        (pension funds, endowments).
+      relevance_to_project: >
+        Strong IV for dividend initiation and level. DiD: C-Corp vs. S-Corp.
+        Caveat: confounded by post-recession earnings recovery — 2013 setting
+        is cleaner for identification.
+    - instrument: "2013 JGTRRA expiration (anticipated tax increase)"
+      mechanism: >
+        Expected increase from 15% to up to 43.4%. Political uncertainty
+        around 2012 election created variation in firm-level expectations.
+        Narrow event window reduces confounding.
+      relevance_to_project: >
+        Cleaner identification than 2003. Institutional ownership composition
+        as moderator. Useful for estimating tax sensitivity as a confounder
+        feature in our scoring model.
+  methodological_notes: >
+    DiD with C-Corp/S-Corp treatment assignment. Placebo tests using REIT
+    dividends as non-responding control. Narrow event windows reduce
+    confounding. Applicable as a model for identifying dividend policy
+    responses to any exogenous shock in our data.
+  limitations: >
+    IV relevance is high but setting is time-specific (2003, 2013 events).
+    Not directly useful for out-of-sample prediction — more relevant for
+    understanding institutional ownership as a confounder feature in our model.
+  priority: high
+  flag: "PAYWALLED — retrieve via school access. SEMINAL IV reference for dividend tax literature."
+
+- research_brief_id: RB-004
+  theme: predictive_vars
+  paper:
+    title: "Finance Without Exotic Risk"
+    authors: ["Bordalo, Pedro", "Gennaioli, Nicola", "La Porta, Rafael", "Shleifer, Andrei"]
+    year: 2024
+    source: "NBER Working Paper 33004"
+    url_or_doi: "https://www.nber.org/papers/w33004"
+    access: open
+    local_path: "references/pdfs/RB-004_bordalo_2024_finance_no_exotic_risk.pdf"
+  key_finding: >
+    Expectation-Based Returns (EBRs) — derived from analyst earnings forecasts —
+    account for most cross-sectional return predictability typically attributed
+    to risk factors (value, size premia). Non-rational expectation cycles
+    explain return anomalies better than unobserved variation in required
+    returns. Analyst dividend forecasts derived from expected EPS provide a
+    measurable proxy for market expectations that significantly predicts returns.
+  operationalizable_variables:
+    - variable_name: analyst_eps_consensus
+      definition: Consensus analyst EPS forecast for next 4 quarters
+      bloomberg_field_candidate: BEST_EPS
+      derivation_notes: >
+        Key signal: EBRs from these forecasts predict returns. Availability
+        from 2002 onward (~56% obs coverage per paper).
+    - variable_name: eps_forecast_revision_1q
+      definition: Quarter-over-quarter change in consensus EPS forecast
+      bloomberg_field_candidate: "BEST_EPS (difference across vintages)"
+      derivation_notes: >
+        Upward revisions associated with future outperformance. Requires
+        storing multiple forecast vintages — Bloomberg historical estimates
+        available. LEAKAGE NOTE: use only estimates available at time t.
+    - variable_name: ltg_analyst_estimate
+      definition: Long-term EPS growth estimate (analyst consensus)
+      bloomberg_field_candidate: BEST_LTG_EPS
+      derivation_notes: >
+        Cross-sectional variation in LTG predicts return spreads.
+        LEAKAGE NOTE: use only estimates available at time t, not
+        forward-revised values.
+  iv_candidates: []
+  methodological_notes: >
+    Campbell-Shiller decomposition used to isolate cash flow news from
+    discount rate news in returns. Method for constructing expected dividend
+    per share from expected EPS is documented — directly applicable to feature
+    engineering. Uses CRSP + Compustat + I/B/E/S; Bloomberg equivalents
+    available. EBR construction gives a principled way to derive expected
+    dividends from analyst forecasts — more forward-looking than trailing
+    dividend series alone.
+  limitations: >
+    Expected payout data limited before 2002 (~25% full sample, ~56% from 2002).
+    Focus is market-level predictability; individual stock application requires
+    validation. Authors use I/B/E/S — Bloomberg BEST_EPS field equivalence
+    should be verified before pipeline construction.
+  priority: high
+  flag: "OPEN ACCESS — no paywall. Directly usable now."
+
+- research_brief_id: RB-005
+  theme: predictive_vars
+  paper:
+    title: "Predicting the Equity Premium with Dividend Ratios"
+    authors: ["Goyal, Amit", "Welch, Ivo"]
+    year: 2003
+    source: "Journal (Management Science, INFORMS)"
+    url_or_doi: "https://pubsonline.informs.org/doi/10.1287/mnsc.49.5.639.15149"
+    access: paywalled
+    local_path: "references/pdfs/RB-005_goyal_welch_2003_dividend_ratios.pdf"
+  key_finding: >
+    Dividend-price ratio (D/P) and dividend yield have no reliable out-of-sample
+    predictive power for the equity premium. Any apparent in-sample predictability
+    was driven by just two years — 1973 and 1974. Increasing persistence of the
+    dividend-price ratio is the structural reason for failure. Critical cautionary
+    finding: a model that looks good in-sample on yield-based features may
+    completely fail out-of-sample. Walk-forward validation is non-negotiable.
+  operationalizable_variables:
+    - variable_name: dp_ratio
+      definition: "Dividend-price ratio: trailing 12M dividends / current price"
+      bloomberg_field_candidate: DVD_YLD
+      derivation_notes: >
+        INCLUDE in feature set but do NOT treat as primary predictor. Paper
+        shows out-of-sample failure. Include to benchmark against superior
+        features and demonstrate methodological awareness.
+    - variable_name: dy_persistence
+      definition: Autocorrelation of dividend yield over rolling 8-quarter window
+      bloomberg_field_candidate: "DVD_YLD (derived)"
+      derivation_notes: >
+        High persistence is a warning sign of the Goyal-Welch failure mode.
+        Can be used as a feature quality filter or weight dampener.
+  iv_candidates: []
+  methodological_notes: >
+    Introduces recursive out-of-sample R² as the gold standard for evaluating
+    genuine predictive power — superior to in-sample R² which overstates
+    predictability due to look-ahead. Recursive residuals graphical approach
+    is a practical diagnostic worth implementing in our evaluation notebook.
+    If a feature's out-of-sample R² is near zero or negative, exclude it
+    regardless of in-sample performance.
+  limitations: >
+    Aggregate market-level analysis. Individual stock dividend yield may
+    behave differently than the aggregate. Our universe is all dividend payers
+    (not market-wide) which may partially mitigate the issue. But the
+    out-of-sample failure warning applies broadly — FCF payout ratio, earnings
+    persistence, and analyst revision signals (RB-004) are likely more robust
+    than raw yield.
+  priority: high
+  flag: "PAYWALLED — retrieve via school access. SEMINAL negative result — cite to demonstrate rigor."

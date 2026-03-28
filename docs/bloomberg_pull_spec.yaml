@@ -1,0 +1,527 @@
+# Bloomberg Pull Specification
+# File: docs/bloomberg_pull_spec.yaml
+# Version: 1.1
+# Date: 2026-03-28
+# Status: APPROVED — researcher sign-off 2026-03-28
+#
+# DECISIONS INCORPORATED:
+#   - Universe trimmed to 76 US-listed tickers (24 non-US ADRs excluded)
+#   - Dual Chronos-2 pipeline approved: pipeline 1 = dividend series target,
+#     pipeline 2 = total return target. Both run on same walk-forward splits.
+#   - Non-US expansion deferred to phase 2 after preliminary results
+#
+# PURPOSE: This file drives src/bloomberg/pull.py and the Excel pull template.
+# Claude Code should read this file to generate both the Excel BDH/BDP sheets
+# and the blpapi Python script. All field mnemonics verified against
+# session_002_research_variables.yaml.
+#
+# UNIVERSE FILE: data/universe/Dividend_stocks_US_76.csv (76 US tickers)
+# HISTORY START: 2008-01-01
+# HISTORY END:   today (pull as of terminal session date)
+# PANEL FREQUENCY: quarterly (sample BDH monthly/daily fields at quarter-end)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PULL ARCHITECTURE
+# ─────────────────────────────────────────────────────────────────────────────
+
+pull_architecture:
+  equity_universe: data/universe/Dividend_stocks_US_76.csv
+  equity_universe_note: >
+    76 US-listed tickers. Non-US ADRs excluded per researcher decision.
+    Five foreign-incorporated US-listed tickers included (UL, SCCO, CB, ETN, LIN)
+    — these are primary NYSE listings, not ADRs, and file with the SEC.
+  macro_universe:
+    - "USGG10YR Index"
+    - "FDTR Index"
+    - "VIX Index"
+    - "CPI YOY Index"
+  output_dir: data/raw/
+  file_naming: "{sheet_name}_{YYYYMMDD}.csv"
+  excel_template: data/raw/bloomberg_pull_template.xlsx
+
+  dual_pipeline_targets:
+    pipeline_1:
+      field: DVD_SH_12M
+      var_id: V-001
+      notebook: notebooks/03a_model_chronos_dividend_series.ipynb
+    pipeline_2:
+      field: TOT_RETURN_INDEX_GROSS_DVDS
+      var_id: V-032
+      notebook: notebooks/03b_model_chronos_total_return.ipynb
+    note: >
+      Both target fields pulled in the same BDH request. The pipeline
+      separation happens in model training — not in the Bloomberg pull.
+      Both fields must be treated as target variables in feature engineering:
+      never included as model features, only used as targets/labels.
+
+  sheets:
+    - sheet_name: BDH_fundamentals
+      description: Quarterly time-series fundamentals for all 101 equity tickers
+      pull_type: BDH
+      frequency: Q  # quarterly
+      fill: B       # fill blanks forward
+      notes: >
+        For quarterly fields: Bloomberg will return the most recent quarterly
+        value as of each quarter-end date. Set periodicity to QUARTERLY.
+        Use BDH with PeriodicitySelection=QUARTERLY, PeriodicityAdjustment=ACTUAL.
+
+    - sheet_name: BDH_price_return
+      description: Monthly price and return data — sample at quarter-end
+      pull_type: BDH
+      frequency: M  # pull monthly, sample at quarter-end in Python
+      fill: B
+      notes: >
+        Pull monthly then downsample to quarter-end dates in the panel build.
+        Do NOT pull daily price data — storage overhead not justified.
+
+    - sheet_name: BDH_dividend_events
+      description: Per-event dividend history (all payments, not aggregated)
+      pull_type: BDH
+      frequency: daily  # Bloomberg returns events as they occur
+      notes: >
+        Pull using CORPORATE_ACTIONS override or DVD_CASH_AMT with
+        non-periodic BDH. Needed to identify special vs regular dividends
+        and to construct the dividend per share time series. Store raw
+        events before any aggregation.
+
+    - sheet_name: BDP_snapshot
+      description: Point-in-time snapshot fields (no history)
+      pull_type: BDP
+      notes: >
+        These fields return current values only. Pull once at terminal session.
+        Used for sector classification, country flags, and current DGR fields.
+
+    - sheet_name: BDH_macro
+      description: Macro index fields — separate pull with Index tickers
+      pull_type: BDH
+      frequency: M  # monthly
+      tickers: macro_universe  # NOT equity tickers — use Index tickers
+      notes: >
+        IMPORTANT: Macro fields use Index tickers (e.g., USGG10YR Index),
+        NOT equity tickers. This sheet uses a DIFFERENT ticker list than
+        the equity sheets. Run as a separate BDH request.
+
+    - sheet_name: BDH_analyst_estimates
+      description: Analyst EPS consensus — requires vintage override
+      pull_type: BDH
+      frequency: Q
+      bloomberg_overrides:
+        BEST_FPERIOD_OVERRIDE: "1BF"   # next fiscal year forward estimate
+        BEST_CONSENSUS_OVERRIDE: "BEst"
+      notes: >
+        CRITICAL LEAKAGE RISK: Without the overrides above, Bloomberg returns
+        the CURRENT consensus (forward-biased). With overrides, it returns
+        the forward estimate as available at each historical date.
+        VERIFY on 1 ticker (JPM) before full universe pull. Compare
+        2020 Q1 estimate with and without override to confirm vintage behavior.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SHEET 1: BDH_fundamentals — Quarterly Fields
+# ─────────────────────────────────────────────────────────────────────────────
+
+bdh_fundamentals_fields:
+  # Priority legend: C=critical, H=high, M=medium
+  # All fields: BDH, quarterly, 2008-01-01 to today
+
+  dividend_fields:
+    - field: DVD_SH_12M
+      var_id: V-001
+      name: dividend_per_share_ttm
+      priority: C
+      notes: Trailing 12M DPS. Core Chronos-2 target series.
+
+    - field: DVD_YLD
+      var_id: V-002
+      name: dividend_yield
+      priority: H
+      notes: Use as confounder only per RB-005. Not primary predictor.
+
+    - field: DVD_PAYOUT_RATIO
+      var_id: V-006
+      name: payout_ratio_earnings
+      priority: H
+      notes: Earnings-based. Annual field — Bloomberg may return NaN for
+             intermediate quarters. Forward-fill within fiscal year.
+
+  profitability_fields:
+    - field: RETURN_ON_ASSET
+      var_id: V-009
+      name: return_on_assets
+      priority: C
+      notes: RNOA proxy. 45-day reporting lag. Flag LEAKAGE CHECK.
+
+    - field: RETURN_ON_EQ
+      var_id: V-010
+      name: return_on_equity
+      priority: H
+      notes: 45-day reporting lag.
+
+    - field: GROSS_MARGIN
+      var_id: V-012
+      name: gross_margin
+      priority: H
+      notes: Profit margin proxy for DuPont analysis (RB-002).
+
+  size_risk_fields:
+    - field: BS_TOT_ASSET
+      var_id: "V-015 and V-030"
+      name: total_assets
+      priority: C
+      notes: Pull ONCE. Derive ln_total_assets in feature engineering.
+             Do not pull twice.
+
+    - field: BETA_RAW_1YR
+      var_id: V-017
+      name: beta_1y
+      priority: C
+      notes: "#2 predictor in RB-001. Rolling 1Y at quarter-end."
+
+    - field: BETA_RAW_5YR
+      var_id: V-018
+      name: beta_5y
+      priority: M
+      notes: For beta divergence feature. May correlate highly with 1Y.
+
+    - field: PX_TO_BOOK_RATIO
+      var_id: V-019
+      name: price_to_book
+      priority: H
+      notes: "#3 predictor in RB-001."
+
+  liquidity_leverage_fields:
+    - field: CUR_RATIO
+      var_id: V-020
+      name: current_ratio
+      priority: H
+      notes: "#4 predictor in RB-001."
+
+    - field: TOT_DEBT_TO_TOT_EQY
+      var_id: V-021
+      name: debt_to_equity
+      priority: H
+      notes: "#5 predictor in RB-001."
+
+    - field: EBIT_TO_INT_EXPENSE
+      var_id: V-022
+      name: interest_coverage
+      priority: H
+      notes: Debt service vs earnings signal for cut risk.
+
+    - field: CF_FREE_CASH_FLOW
+      var_id: V-023
+      name: free_cash_flow
+      priority: C
+      notes: "LEAKAGE CHECK: 45-60 day filing lag. FCF payout ratio numerator."
+
+    - field: CF_CASH_FROM_OPER
+      var_id: V-024
+      name: operating_cash_flow
+      priority: C
+      notes: Required for accruals derivation. Same lag as FCF.
+
+    - field: CASH_AND_NEAR_CASH_ITEM
+      var_id: V-025
+      name: cash_and_equivalents
+      priority: H
+      notes: Cash buffer signal. Also needed for G_NOA derivation.
+
+  income_statement_fields:
+    - field: SALES_REV_TURN
+      var_id: V-026
+      name: revenue
+      priority: C
+      notes: Required for asset_turnover and profit_margin derivations.
+
+    - field: NET_INCOME
+      var_id: V-027
+      name: net_income
+      priority: C
+      notes: Required for accruals and earnings persistence score.
+
+    - field: EBITDA
+      var_id: V-028
+      name: ebitda
+      priority: M
+      notes: Supplementary cash generation proxy.
+
+    - field: IS_DILUTED_EPS
+      var_id: V-029
+      name: eps_diluted
+      priority: H
+      notes: For earnings payout ratio and special dividend identification.
+
+    - field: SHORT_AND_LONG_TERM_DEBT
+      var_id: V-031
+      name: total_debt
+      priority: C
+      notes: Required for G_NOA derivation and D/E ratio.
+
+  dividend_growth_fields:  # Annual — pull with quarterly BDH, values repeat within year
+    - field: DVD_GRWTH_1Y
+      var_id: V-003
+      name: dvd_growth_rate_1y
+      priority: C
+
+    - field: DVD_GRWTH_3Y
+      var_id: V-004
+      name: dvd_growth_rate_3y
+      priority: C
+
+    - field: DVD_GRWTH_5Y
+      var_id: V-005
+      name: dvd_growth_rate_5y
+      priority: C
+
+    - field: DVD_CONSEC_GR_YRS
+      var_id: V-007
+      name: consecutive_dvd_growth_years
+      priority: H
+
+  ownership_fields:
+    - field: INST_HOLDINGS_PCT
+      var_id: V-037
+      name: institutional_ownership_pct
+      priority: M
+      notes: "Architecture flag: verify exact field name at terminal. 
+              Alt: EQY_INST_HOLDINGS_PCT"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SHEET 2: BDH_price_return — Monthly Fields (downsample to quarter-end)
+# ─────────────────────────────────────────────────────────────────────────────
+
+bdh_price_return_fields:
+  - field: TOT_RETURN_INDEX_GROSS_DVDS
+    var_id: V-032
+    name: total_return_index
+    priority: C
+    notes: >
+      TARGET VARIABLE INPUT. Pull monthly. Downsample to quarter-end.
+      NEVER include as feature in model. Target = forward 4-quarter return.
+      Architecture agent TD-003: confirm pipeline uses this as target only.
+
+  - field: PX_LAST
+    var_id: V-033
+    name: adjusted_close_price
+    priority: H
+    notes: Pull monthly. Downsample to quarter-end.
+
+  - field: PE_RATIO
+    var_id: V-034
+    name: pe_ratio
+    priority: M
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SHEET 3: BDH_dividend_events — Per-Event Pull
+# ─────────────────────────────────────────────────────────────────────────────
+
+bdh_dividend_events_fields:
+  - field: DVD_CASH_AMT
+    var_id: V-038
+    name: dividend_cash_amount_per_event
+    priority: H
+    notes: >
+      Pull all dividend events from 2008-01-01 to today for all tickers.
+      This returns individual payment events, not aggregated totals.
+      In feature engineering: identify special dividends as events where
+      amount > 2x the established quarterly run rate OR Bloomberg codes
+      the event as EXTRA or YEAR_END distribution type.
+      Also pull: DVD_EX_DT (ex-dividend date) and DVD_DECLARED_DT
+      (declaration date) alongside the amount for event-level analysis.
+  
+  additional_event_fields:
+    - DVD_EX_DT         # ex-dividend date
+    - DVD_DECLARED_DT   # board declaration date
+    - DVD_FREQ          # payment frequency (quarterly, monthly, etc.)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SHEET 4: BDP_snapshot — Point-in-Time Fields
+# ─────────────────────────────────────────────────────────────────────────────
+
+bdp_snapshot_fields:
+  - field: GICS_SECTOR_NAME
+    var_id: V-043
+    name: gics_sector
+    priority: C
+
+  - field: GICS_INDUSTRY_NAME
+    var_id: V-044
+    name: gics_industry
+    priority: M
+
+  - field: CNTRY_OF_INCORPORATION
+    var_id: V-045
+    name: country_iso
+    priority: H
+
+  - field: DVD_SH_IND
+    var_id: V-008
+    name: indicated_annual_dividend_current
+    priority: M
+    notes: Snapshot only — current state reference, not for panel.
+
+  - field: TICKER
+    name: bloomberg_ticker
+    notes: Verify ticker format matches CSV.
+
+  - field: NAME
+    name: company_name
+    notes: Confirm against CSV for universe validation.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SHEET 5: BDH_macro — Index Tickers Only
+# ─────────────────────────────────────────────────────────────────────────────
+
+bdh_macro_fields:
+  tickers:
+    - "USGG10YR Index"
+    - "FDTR Index"
+    - "VIX Index"
+    - "CPI YOY Index"
+  frequency: monthly
+  start: "2008-01-01"
+
+  fields:
+    - field: PX_LAST
+      names:
+        "USGG10YR Index": ten_year_treasury_yield
+        "FDTR Index": fed_funds_rate
+        "VIX Index": vix
+        "CPI YOY Index": cpi_yoy
+      notes: >
+        For macro indices, PX_LAST returns the index level / rate value.
+        Pull monthly. Merge to equity panel on date at quarter-end.
+        Downsample at quarter-end to match panel frequency.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SHEET 6: BDH_analyst_estimates — WITH REQUIRED OVERRIDES
+# ─────────────────────────────────────────────────────────────────────────────
+
+bdh_analyst_estimates_fields:
+  bloomberg_overrides:
+    BEST_FPERIOD_OVERRIDE: "1BF"    # 1 fiscal year forward
+    BEST_CONSENSUS_OVERRIDE: "BEst" # Bloomberg consensus
+  frequency: quarterly
+  start: "2008-01-01"
+
+  pre_pull_validation:
+    required: true
+    test_ticker: "JPM US Equity"
+    test_field: BEST_EPS
+    test_dates: ["2020-03-31", "2020-06-30"]
+    validation_check: >
+      With BEST_FPERIOD_OVERRIDE=1BF: the 2020-03-31 estimate should reflect
+      what analysts expected for FY2020 as of March 2020 (pre-COVID revision).
+      WITHOUT override: Bloomberg returns current FY2021+ consensus.
+      If both return the same value, the override is not working — escalate
+      before pulling full universe.
+
+  fields:
+    - field: BEST_EPS
+      var_id: V-035
+      name: analyst_eps_consensus_fwd1y
+      priority: H
+
+    - field: BEST_LTG_EPS
+      var_id: V-036
+      name: analyst_ltg_eps_estimate
+      priority: M
+      notes: Long-term growth estimate. Less subject to vintage issue
+             but still use override for consistency.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PULL SEQUENCE (run in this order at terminal)
+# ─────────────────────────────────────────────────────────────────────────────
+
+recommended_pull_sequence:
+  step_1:
+    action: "Run BDP_snapshot for all 76 US tickers"
+    why: "Validates ticker universe and gets sector/country flags. Fast."
+    output: "data/raw/BDP_snapshot_{date}.csv"
+    time_estimate: "5-10 minutes"
+
+  step_2:
+    action: "Run analyst estimate validation test (JPM only, BEST_EPS with override)"
+    why: "Confirms vintage pull works before committing to full universe"
+    output: "Manual review at terminal"
+    time_estimate: "2 minutes"
+
+  step_3:
+    action: "Run BDH_macro for 4 index tickers"
+    why: "Fast pull, confirms macro field access. Small data."
+    output: "data/raw/BDH_macro_{date}.csv"
+    time_estimate: "2-3 minutes"
+
+  step_4:
+    action: "Run BDH_dividend_events for all 76 tickers (2008-2026)"
+    why: "Event-level data is variable in size — run before fundamentals
+          to confirm data volume."
+    output: "data/raw/BDH_dividend_events_{date}.csv"
+    time_estimate: "10-20 minutes"
+
+  step_5:
+    action: "Run BDH_fundamentals for all 76 tickers (2008-2026, quarterly)"
+    why: "Core fundamental panel. Run after validation steps confirm universe."
+    output: "data/raw/BDH_fundamentals_{date}.csv"
+    time_estimate: "15-35 minutes depending on terminal speed"
+
+  step_6:
+    action: "Run BDH_price_return for all 76 tickers (2008-2026, monthly)"
+    output: "data/raw/BDH_price_return_{date}.csv"
+    time_estimate: "8-15 minutes"
+
+  step_7:
+    action: "Run BDH_analyst_estimates for all 76 tickers (2008-2026, quarterly)"
+    why: "Run last — most complex due to overrides. More likely to have errors."
+    output: "data/raw/BDH_analyst_estimates_{date}.csv"
+    time_estimate: "8-15 minutes"
+
+  total_estimated_time: "50-100 minutes for complete pull"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLAUDE CODE INSTRUCTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+claude_code_instructions: >
+  Read this file and data/universe/Dividend_stocks_US_76.csv to:
+
+  1. First generate data/universe/Dividend_stocks_US_76.csv by filtering
+     data/universe/Dividend_stocks.csv, removing these 24 non-US tickers:
+     TSM, AMX, AZN, ASML, TM, BABA, NVS, HSBC, SHEL, RY, SAP, MUFG,
+     FMX, TV, BHP, TTE, NVO, SAN, TD, CX, HDB, BUD, BTI, PBR.
+     Result should be 76 tickers. Verify count before proceeding.
+
+  2. Generate data/raw/bloomberg_pull_template.xlsx with 6 sheets:
+     BDH_fundamentals, BDH_price_return, BDH_dividend_events,
+     BDP_snapshot, BDH_macro, BDH_analyst_estimates.
+     Each sheet should have:
+       - Row 1: Bloomberg field mnemonics (from fields lists above)
+       - Column A: ticker list from Dividend_stocks_US_76.csv,
+         formatted as "TICKER US Equity" (e.g., "JPM US Equity")
+       - BDH sheets: date range row (start=2008-01-01, end=today)
+       - BDH sheets: periodicity override row where specified
+       - README tab with pull sequence and dual pipeline note
+
+  3. Generate src/bloomberg/pull.py with:
+     - blpapi BDH and BDP functions implementing all 6 pulls above
+     - Reads ticker list from data/universe/Dividend_stocks_US_76.csv
+     - --test flag that runs only on first 5 tickers
+     - --sheet argument to run individual sheets
+     - Error handling with IGNORE_SECURITY_ERROR=TRUE
+     - Output to data/raw/ with datestamped filenames
+     - Analyst estimate sheet uses BDH with override dict above
+     - Macro sheet uses 4 Index tickers only, not equity tickers
+     - All outputs are CSV with ticker, date as first two columns
+
+  IMPORTANT ARCHITECTURE CONSTRAINTS (from AR-001):
+  - At the top of src/features/panel_builder.py add:
+      TARGET_FIELDS = ['TOT_RETURN_INDEX_GROSS_DVDS', 'DVD_SH_12M']
+      # Pipeline 1 target: DVD_SH_12M (dividend series)
+      # Pipeline 2 target: TOT_RETURN_INDEX_GROSS_DVDS (total return)
+      # NEVER include either as a model feature
+    Add an assertion that verifies neither field appears in the feature matrix.
+  - Analyst estimates: validate override on JPM before full pull (step 2)
+  - Add LEAKAGE CHECK comments on FCF, OCF, and all balance sheet fields
+    noting the 45-60 day filing lag requirement
+  - Add is_foreign_incorporated = 1 flag in universe CSV for:
+    UL, SCCO, CB, ETN, LIN (foreign-incorporated, US-listed)
+  - Add is_reit = 1 for WELL, is_utility = 1 for NEE in universe metadata

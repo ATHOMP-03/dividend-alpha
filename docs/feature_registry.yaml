@@ -1,0 +1,397 @@
+# feature_registry.yaml
+# Dividend Alpha Project — Feature Registry
+# All feature specs must pass Architecture Agent review (AR-XXX) before model training.
+# Format follows agent_schema.md feature_spec type.
+# Validated: false = not yet reviewed by architecture agent.
+
+features:
+
+  # ─────────────────────────────────────────────────────────────
+  # DIVIDEND METRICS  (src/features/dividend_metrics.py)
+  # ─────────────────────────────────────────────────────────────
+
+  - feature_id: FE-001
+    name: fcf_payout_ratio
+    description: >
+      Free cash flow payout ratio — total dividends paid as a fraction of free
+      cash flow. Primary measure of payout sustainability from a cash generation
+      perspective. Preferred over earnings payout (FE-002) due to lower
+      susceptibility to accruals.
+    source_research_brief: RB-001
+    source_fields:
+      - bloomberg: DVD_SH_12M
+      - bloomberg: SH_OUT
+      - bloomberg: CF_FREE_CASH_FLOW
+    derivation: (dvd_sh_12m * sh_out) / cf_free_cash_flow
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      dvd_sh_12m is trailing 12M dividends per share reported in prior quarter
+      filing. cf_free_cash_flow is trailing 12M FCF from prior quarter filing.
+      Both are available at time t without forward information.
+    expected_range: [0.0, 3.0]
+    outlier_treatment: >
+      Winsorize at 1st/99th percentile cross-sectionally within each quarter-date
+      before use in composite (FE-012). Raw value stored unwinsorized.
+    missing_strategy: >
+      Flag with fcf_payout_ratio_missing=1 when cf_free_cash_flow is zero or NaN,
+      or when the result is NaN. Do not impute.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/dividend_metrics.py
+    validated: false
+
+  - feature_id: FE-002
+    name: earnings_payout_ratio
+    description: >
+      Earnings payout ratio — total dividends paid as a fraction of net income.
+      Supplementary to FCF payout (FE-001); sensitive to accruals and one-time
+      items. Negative net income rows are excluded.
+    source_research_brief: RB-001
+    source_fields:
+      - bloomberg: DVD_SH_12M
+      - bloomberg: SH_OUT
+      - bloomberg: NET_INCOME
+    derivation: (dvd_sh_12m * sh_out) / net_income
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      net_income is from prior quarter filing. dvd_sh_12m is trailing 12M.
+      Both available at time t.
+    expected_range: [0.0, 3.0]
+    outlier_treatment: >
+      Winsorize at 1st/99th percentile cross-sectionally within each quarter-date
+      before use in composite (FE-012). Raw value stored unwinsorized.
+    missing_strategy: >
+      Flag with earnings_payout_ratio_missing=1 when net_income is zero, negative,
+      or NaN. Negative net income makes payout ratio economically meaningless.
+      Do not impute.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/dividend_metrics.py
+    validated: false
+
+  - feature_id: FE-003
+    name: dgr_1y_pct
+    description: 1-year dividend growth rate (simple growth, not CAGR).
+    source_research_brief: null
+    source_fields:
+      - bloomberg: DVD_SH_12M
+    derivation: (dvd_sh_12m_t / dvd_sh_12m_{t-4}) - 1
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      Uses only trailing dvd_sh_12m values. Lag-4 shift applied within-ticker
+      only — no cross-ticker contamination, no forward data.
+    expected_range: [-1.0, 2.0]
+    outlier_treatment: Winsorize at 1st/99th percentile cross-sectionally within each quarter-date.
+    missing_strategy: >
+      Flag with dgr_1y_pct_missing=1 when the lagged value is NaN or non-positive
+      (cannot compute growth rate on zero/negative base). Do not impute.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/dividend_metrics.py
+    validated: false
+
+  - feature_id: FE-004
+    name: dgr_3y_pct
+    description: 3-year dividend growth rate (CAGR). Requires 3 years of history.
+    source_research_brief: null
+    source_fields:
+      - bloomberg: DVD_SH_12M
+    derivation: (dvd_sh_12m_t / dvd_sh_12m_{t-12})^(1/3) - 1
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: Lag-12 shift within ticker. Requires 12 quarters of trailing data minimum.
+    expected_range: [-0.5, 1.0]
+    outlier_treatment: Winsorize at 1st/99th percentile cross-sectionally within each quarter-date.
+    missing_strategy: >
+      Flag with dgr_3y_pct_missing=1 when insufficient history (< 12 quarters) or
+      when the lagged value is non-positive. Do not impute.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/dividend_metrics.py
+    validated: false
+
+  - feature_id: FE-005
+    name: dgr_5y_pct
+    description: 5-year dividend growth rate (CAGR). Requires 5 years of history.
+    source_research_brief: null
+    source_fields:
+      - bloomberg: DVD_SH_12M
+    derivation: (dvd_sh_12m_t / dvd_sh_12m_{t-20})^(1/5) - 1
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: Lag-20 shift within ticker. Requires 20 quarters of trailing data minimum.
+    expected_range: [-0.3, 0.8]
+    outlier_treatment: Winsorize at 1st/99th percentile cross-sectionally within each quarter-date.
+    missing_strategy: >
+      Flag with dgr_5y_pct_missing=1 when insufficient history (< 20 quarters) or
+      when the lagged value is non-positive. Do not impute.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/dividend_metrics.py
+    validated: false
+
+  # ─────────────────────────────────────────────────────────────
+  # YIELD FEATURES  (src/features/yield_features.py)
+  # ─────────────────────────────────────────────────────────────
+
+  - feature_id: FE-006
+    name: dp_ratio
+    description: >
+      Dividend-price ratio (trailing 12M dividends per share / end-of-quarter price).
+      CAUTION: per RB-005 (Goyal & Welch 2003), this feature has demonstrated
+      out-of-sample predictive failure at the aggregate level. Include for
+      benchmarking only — do not weight heavily without strong OOS validation.
+    source_research_brief: RB-005
+    source_fields:
+      - bloomberg: DVD_SH_12M
+      - bloomberg: PX_LAST
+    derivation: dvd_sh_12m / px_last
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      dvd_sh_12m is trailing 12M; px_last is end-of-quarter closing price.
+      Both available at time t — no forward-looking data used.
+    expected_range: [0.0, 0.20]
+    outlier_treatment: Winsorize at 1st/99th percentile cross-sectionally within each quarter-date.
+    missing_strategy: Flag with dp_ratio_missing=1 when px_last is zero, negative, or NaN.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/yield_features.py
+    validated: false
+
+  - feature_id: FE-007
+    name: dy_persistence
+    description: >
+      Rolling lag-1 autocorrelation of dividend yield over trailing 8 quarters.
+      High persistence (near 1.0) is a Goyal-Welch warning signal (RB-005) for
+      D/P predictability failure. Use as a feature quality filter or weight dampener.
+    source_research_brief: RB-005
+    source_fields:
+      - bloomberg: DVD_YLD
+    derivation: rolling_autocorr(dvd_yld, lag=1, window=8) within ticker
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      Strictly trailing rolling window within each ticker. No forward-looking data.
+      Requires 8+ quarters of history — partial windows produce NaN.
+    expected_range: [-1.0, 1.0]
+    outlier_treatment: No winsorization — bounded by construction [-1, 1].
+    missing_strategy: >
+      Flag with dy_persistence_missing=1 when fewer than 8 quarters of history
+      are available for a given ticker-date.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/yield_features.py
+    validated: false
+
+  # ─────────────────────────────────────────────────────────────
+  # QUALITY COMPOSITES  (src/features/quality_composites.py)
+  # ─────────────────────────────────────────────────────────────
+
+  - feature_id: FE-008
+    name: log_market_cap_usd
+    description: >
+      Natural log of market capitalization (USD millions). Per RB-001 (Ivascu 2023),
+      the strongest single predictor of dividend initiation and continuation.
+      Log-transform compresses scale and reduces skew.
+    source_research_brief: RB-001
+    source_fields:
+      - bloomberg: CUR_MKT_CAP
+    derivation: log(cur_mkt_cap)
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: cur_mkt_cap is end-of-quarter market cap. Available at time t.
+    expected_range: [5.0, 20.0]
+    outlier_treatment: No winsorization — log-transform already compresses scale.
+    missing_strategy: >
+      Flag with log_market_cap_usd_missing=1 when cur_mkt_cap is NaN or <= 0.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/quality_composites.py
+    validated: false
+
+  - feature_id: FE-009
+    name: earnings_persistence_score
+    description: >
+      Rolling coefficient of variation of net income over trailing 8 quarters.
+      CoV = std / |mean|. Lower CoV = more persistent earnings = higher dividend
+      sustainability. Per RB-002 (Jones 2023).
+    source_research_brief: RB-002
+    source_fields:
+      - bloomberg: NET_INCOME
+    derivation: rolling_std(net_income, 8) / |rolling_mean(net_income, 8)| within ticker
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      Trailing 8-quarter rolling window within each ticker. net_income is from
+      prior quarter filing. No forward-looking data used.
+    expected_range: [0.0, 5.0]
+    outlier_treatment: Winsorize at 99th percentile (lower is better — cap extreme values).
+    missing_strategy: >
+      Flag with earnings_persistence_score_missing=1 when fewer than 8 quarters
+      of history are available or when rolling mean is near zero (|mean| < 1e-6).
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/quality_composites.py
+    validated: false
+
+  - feature_id: FE-010
+    name: roe_change_1q_pct
+    description: >
+      Quarter-over-quarter change in return on equity (first difference).
+      Profitability momentum signal — per RB-002 (Jones 2023), upward ROE
+      momentum predicts forward payout capacity.
+    source_research_brief: RB-002
+    source_fields:
+      - bloomberg: RETURN_ON_EQ
+    derivation: return_on_eq_t - return_on_eq_{t-1} within ticker
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      return_on_eq is from prior quarter filing. Lag-1 shift within ticker only.
+      Uses value as reported in prior quarter — not subsequently revised.
+    expected_range: [-0.3, 0.3]
+    outlier_treatment: Winsorize at 1st/99th percentile cross-sectionally within each quarter-date.
+    missing_strategy: >
+      Flag with roe_change_1q_pct_missing=1 when either the current or lagged
+      return_on_eq value is NaN.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/quality_composites.py
+    validated: false
+
+  - feature_id: FE-011
+    name: firm_risk_composite
+    description: >
+      Equal-weighted cross-sectional z-score composite of market beta and
+      debt-to-market ratio. Higher score = riskier firm. Per RB-001 (Ivascu 2023):
+      lower-risk firms are systematically more likely to sustain dividends.
+    source_research_brief: RB-001
+    source_fields:
+      - bloomberg: BETA_RAW_1YR
+      - bloomberg: SHORT_AND_LONG_TERM_DEBT
+      - bloomberg: CUR_MKT_CAP
+    derivation: >
+      leverage = short_and_long_term_debt / cur_mkt_cap;
+      firm_risk_composite = (winsorize_zscore_cross(beta_raw_1yr) +
+                              winsorize_zscore_cross(leverage)) / 2
+      where winsorize_zscore_cross = winsorize at 1st/99th then z-score
+      cross-sectionally within each quarter-date.
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      beta_raw_1yr is trailing 1Y. short_and_long_term_debt and cur_mkt_cap are
+      end-of-quarter values. Z-scores computed cross-sectionally within each
+      date — no temporal forward look.
+    expected_range: [-3.0, 3.0]
+    outlier_treatment: Each component winsorized at 1st/99th percentile before z-scoring.
+    missing_strategy: >
+      Flag with firm_risk_composite_missing=1 when either beta_raw_1yr or the
+      leverage ratio is NaN.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/quality_composites.py
+    validated: false
+
+  - feature_id: FE-012
+    name: yield_sustainability_score
+    description: >
+      Composite sustainability score combining FCF payout ratio (FE-001),
+      earnings payout ratio (FE-002), and debt-to-market ratio. Higher = more
+      sustainable yield. Requires FE-001 and FE-002 to be pre-computed in panel.
+    source_research_brief: RB-001
+    source_fields:
+      - bloomberg: CF_FREE_CASH_FLOW
+      - bloomberg: NET_INCOME
+      - bloomberg: DVD_SH_12M
+      - bloomberg: SH_OUT
+      - bloomberg: SHORT_AND_LONG_TERM_DEBT
+      - bloomberg: CUR_MKT_CAP
+    derivation: >
+      -(winsorize_zscore_cross(fcf_payout_ratio) +
+        winsorize_zscore_cross(earnings_payout_ratio) +
+        winsorize_zscore_cross(debt_to_mktcap)) / 3
+      Sign flip: lower payout/debt = higher sustainability score.
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      All component features (FE-001, FE-002) are leakage-safe by construction.
+      Cross-sectional z-scoring within each date — no temporal forward look.
+    expected_range: [-3.0, 3.0]
+    outlier_treatment: Each component winsorized at 1st/99th percentile before z-scoring.
+    missing_strategy: >
+      Flag with yield_sustainability_score_missing=1 when any component is NaN.
+      Partial imputation not allowed — all three components required.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/quality_composites.py
+    validated: false
+
+  # ─────────────────────────────────────────────────────────────
+  # ANALYST SIGNALS  (src/features/analyst_signals.py)
+  # ─────────────────────────────────────────────────────────────
+
+  - feature_id: FE-013
+    name: analyst_eps_consensus_usd
+    description: >
+      Analyst consensus EPS forecast for the next 4 quarters (Bloomberg BEST_EPS).
+      Per RB-004 (Bordalo et al. 2024): primary input for Expectation-Based Returns.
+      Coverage begins ~2002 on Bloomberg.
+    source_research_brief: RB-004
+    source_fields:
+      - bloomberg: BEST_EPS
+    derivation: best_eps (as-of quarter-end date from Bloomberg historical estimates)
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      CRITICAL: must be sourced as-of quarter-end using Bloomberg BDH with
+      PERIODICITY_OVERRIDE=Q (or equivalent). A live pull for historical rows
+      embeds post-date analyst revisions — confirmed forward-looking leak.
+      Pre-2002 observations will be NaN.
+    expected_range: [-5.0, 50.0]
+    outlier_treatment: Winsorize at 1st/99th percentile cross-sectionally within each quarter-date.
+    missing_strategy: >
+      Flag with analyst_eps_consensus_usd_missing=1 when BEST_EPS is NaN.
+      Do not impute — missing coverage is itself informative.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/analyst_signals.py
+    validated: false
+
+  - feature_id: FE-014
+    name: eps_forecast_revision_1q_usd
+    description: >
+      Quarter-over-quarter change in analyst consensus EPS forecast (first difference).
+      Upward revisions predict future outperformance per RB-004 (Bordalo et al. 2024).
+    source_research_brief: RB-004
+    source_fields:
+      - bloomberg: BEST_EPS
+    derivation: best_eps_t - best_eps_{t-1} within ticker
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      Requires two consecutive quarter-end BEST_EPS vintages, each sourced
+      as-of their respective quarter-end. Never use forward-revised estimates
+      for historical rows. See FE-013 sourcing note.
+    expected_range: [-10.0, 10.0]
+    outlier_treatment: Winsorize at 1st/99th percentile cross-sectionally within each quarter-date.
+    missing_strategy: >
+      Flag with eps_forecast_revision_1q_usd_missing=1 when either the current or
+      lagged BEST_EPS vintage is NaN. Do not impute.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/analyst_signals.py
+    validated: false
+
+  - feature_id: FE-015
+    name: ltg_analyst_estimate_pct
+    description: >
+      Long-term EPS growth estimate from analyst consensus (Bloomberg BEST_LTG_EPS).
+      Cross-sectional variation in LTG predicts return spreads per RB-004.
+      Coverage may be limited before ~2000.
+    source_research_brief: RB-004
+    source_fields:
+      - bloomberg: BEST_LTG_EPS
+    derivation: best_ltg_eps (as-of quarter-end date from Bloomberg historical estimates)
+    frequency: quarterly
+    leakage_safe: true
+    leakage_notes: >
+      Must be sourced as-of quarter-end from Bloomberg historical estimates.
+      Do not use a live pull for historical rows. See FE-013 sourcing note.
+    expected_range: [-0.2, 0.5]
+    outlier_treatment: Winsorize at 1st/99th percentile cross-sectionally within each quarter-date.
+    missing_strategy: >
+      Flag with ltg_analyst_estimate_pct_missing=1 when BEST_LTG_EPS is NaN.
+      Do not impute — missing coverage is informative.
+    notebook: notebooks/02_feature_engineering.ipynb
+    script: src/features/analyst_signals.py
+    validated: false
